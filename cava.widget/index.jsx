@@ -9,7 +9,7 @@ const POS_KEY = 'cava_widget_position';
 const SIZE_KEY = 'cava_widget_size';
 const SCREEN_MARGIN = 2;
 const SNAP_THRESHOLD = 20;
-const SNAP_MARGIN_X = settings.snapMarginX !== undefined ? settings.snapMarginX : 18;
+const SNAP_MARGIN_X = settings.snapMarginX !== undefined ? settings.snapMarginX : 15;
 const SNAP_MARGIN_TOP = settings.snapMarginTop !== undefined ? settings.snapMarginTop : 14;
 const SNAP_MARGIN_BOTTOM = settings.snapMarginBottom !== undefined ? settings.snapMarginBottom : 14;
 const DEFAULT_BARS_COUNT = settings.barsCount || 28;

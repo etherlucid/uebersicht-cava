@@ -44,6 +44,11 @@ export const settings = {
   barsCount: 28,      // Number of frequency bars
   barGap: 3,          // Gap in pixels between bars
   minBarHeightPct: 2, // Height percentage of idle bar heads (set to 0 for no idle bar)
+
+  // Desktop corner snapping margins (pixels from screen edges / menu bar)
+  snapMarginX: 15,
+  snapMarginTop: 14,
+  snapMarginBottom: 14,
 };
 
 export default { theme, settings };
