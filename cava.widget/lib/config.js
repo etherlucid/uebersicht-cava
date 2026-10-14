@@ -45,8 +45,10 @@ export const settings = {
   barGap: 3,          // Gap in pixels between bars
   minBarHeightPct: 2, // Height percentage of idle bar heads (set to 0 for no idle bar)
 
-  // Desktop corner snapping margins (pixels from screen edges / menu bar)
-  snapMarginX: 15,
+  // Desktop corner snapping
+  enableSnapping: true, // Set to false to disable snapping completely
+  snapThreshold: 6,     // Snap magnetic catch threshold in pixels (subtle notch)
+  snapMarginX: 15,      // Desktop corner snapping margins (pixels from screen edges / menu bar)
   snapMarginTop: 14,
   snapMarginBottom: 14,
 };
