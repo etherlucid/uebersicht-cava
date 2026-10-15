@@ -194,51 +194,104 @@ function getGradientCss(colors, mode, bandCount = 24) {
   return `linear-gradient(to top, ${colors.join(', ')})`;
 }
 
-const getInitialPosition = () => {
+const getScreenId = () => {
+  try {
+    if (typeof window !== 'undefined' && window.location && window.location.pathname) {
+      const parts = window.location.pathname.split('/');
+      if (parts[1] !== undefined && parts[1] !== '') {
+        return `screen_${parts[1]}`;
+      }
+    }
+  } catch (e) {}
+  try {
+    if (typeof window !== 'undefined' && window.screen) {
+      return `screen_${window.screen.width}x${window.screen.height}`;
+    }
+  } catch (e) {}
+  return 'screen_0';
+};
+
+const getInitialInstances = () => {
+  const screenId = getScreenId();
+  try {
+    const saved = localStorage.getItem(`${POS_KEY}_instances_${screenId}`);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (e) {}
+
+  try {
+    const saved = localStorage.getItem(`${POS_KEY}_${screenId}`);
+    const savedSize = localStorage.getItem(`${SIZE_KEY}_${screenId}`) || localStorage.getItem(SIZE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      const parsedSize = savedSize ? JSON.parse(savedSize) : null;
+      if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
+        return [{
+          id: 'default',
+          x: Math.max(SCREEN_MARGIN, parsed.x),
+          y: Math.max(SCREEN_MARGIN, parsed.y),
+          w: parsedSize?.w || 380,
+          h: parsedSize?.h || 140,
+        }];
+      }
+    }
+  } catch (e) {}
+
   try {
     const saved = localStorage.getItem(POS_KEY);
+    const savedSize = localStorage.getItem(SIZE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
+      const parsedSize = savedSize ? JSON.parse(savedSize) : null;
       if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
-        const maxX = Math.max(SCREEN_MARGIN, (window.innerWidth || 1920) - 180);
-        const maxY = Math.max(SCREEN_MARGIN, (window.innerHeight || 1080) - 70);
-        return {
-          x: Math.max(SCREEN_MARGIN, Math.min(maxX, parsed.x)),
-          y: Math.max(SCREEN_MARGIN, Math.min(maxY, parsed.y)),
-        };
+        return [{
+          id: 'default',
+          x: Math.max(SCREEN_MARGIN, parsed.x),
+          y: Math.max(SCREEN_MARGIN, parsed.y),
+          w: parsedSize?.w || 380,
+          h: parsedSize?.h || 140,
+        }];
       }
     }
   } catch (e) {}
-  return { x: SNAP_MARGIN_X, y: SNAP_MARGIN_TOP };
+
+  return [{
+    id: 'default',
+    x: SNAP_MARGIN_X,
+    y: SNAP_MARGIN_TOP,
+    w: 380,
+    h: 140,
+  }];
 };
 
-const getInitialSize = () => {
+const saveInstances = (instances) => {
+  const screenId = getScreenId();
   try {
-    const saved = localStorage.getItem(SIZE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (typeof parsed.w === 'number' && typeof parsed.h === 'number') {
-        return {
-          w: Math.max(180, Math.min((window.innerWidth || 1920) - 20, parsed.w)),
-          h: Math.max(70, Math.min((window.innerHeight || 1080) - 20, parsed.h)),
-        };
-      }
+    localStorage.setItem(`${POS_KEY}_instances_${screenId}`, JSON.stringify(instances));
+    if (instances && instances[0]) {
+      localStorage.setItem(`${POS_KEY}_${screenId}`, JSON.stringify({ x: instances[0].x, y: instances[0].y }));
+      localStorage.setItem(`${SIZE_KEY}_${screenId}`, JSON.stringify({ w: instances[0].w, h: instances[0].h }));
     }
   } catch (e) {}
-  return { w: 380, h: 140 };
 };
 
-const initialPos = getInitialPosition();
-const initialSize = getInitialSize();
+const initialInstances = getInitialInstances();
 
 export const initialState = {
-  x: initialPos.x,
-  y: initialPos.y,
-  w: initialSize.w,
-  h: initialSize.h,
+  instances: initialInstances,
+  x: initialInstances[0]?.x ?? SNAP_MARGIN_X,
+  y: initialInstances[0]?.y ?? SNAP_MARGIN_TOP,
+  w: initialInstances[0]?.w ?? 380,
+  h: initialInstances[0]?.h ?? 140,
   enableSnapping: getInitialSnapping(),
   isDragging: false,
+  draggingInstanceId: null,
   isResizing: false,
+  resizingInstanceId: null,
   dragStartX: 0,
   dragStartY: 0,
   startPosX: 0,
@@ -272,34 +325,45 @@ export const updateState = (event, previousState) => {
     return {
       ...previousState,
       isDragging: true,
+      draggingInstanceId: event.instanceId,
       dragStartX: event.clientX,
       dragStartY: event.clientY,
-      startPosX: previousState.x,
-      startPosY: previousState.y,
+      startPosX: event.startPosX !== undefined ? event.startPosX : previousState.x,
+      startPosY: event.startPosY !== undefined ? event.startPosY : previousState.y,
+      startW: event.w || previousState.w || 380,
+      startH: event.h || previousState.h || 140,
     };
   }
 
-  if (event.type === 'MOVE_DRAG' && previousState.isDragging) {
+  if (event.type === 'MOVE_DRAG' && previousState.isDragging && previousState.draggingInstanceId) {
     const deltaX = event.clientX - previousState.dragStartX;
     const deltaY = event.clientY - previousState.dragStartY;
+    const cardW = previousState.startW || previousState.w || 380;
+    const cardH = previousState.startH || previousState.h || 140;
 
     const bypassSnap = previousState.enableSnapping === false || event.bypassSnap || event.metaKey;
     const { x: newX, y: newY } = calculateSnappedPosition(
       previousState.startPosX + deltaX,
       previousState.startPosY + deltaY,
-      previousState.w,
-      previousState.h,
+      cardW,
+      cardH,
       bypassSnap
     );
 
-    try {
-      localStorage.setItem(POS_KEY, JSON.stringify({ x: newX, y: newY }));
-    } catch (e) {}
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === previousState.draggingInstanceId) {
+        return { ...inst, x: newX, y: newY };
+      }
+      return inst;
+    });
+
+    saveInstances(updatedInstances);
 
     return {
       ...previousState,
-      x: newX,
-      y: newY,
+      instances: updatedInstances,
+      x: updatedInstances[0]?.x ?? newX,
+      y: updatedInstances[0]?.y ?? newY,
     };
   }
 
@@ -307,6 +371,7 @@ export const updateState = (event, previousState) => {
     return {
       ...previousState,
       isDragging: false,
+      draggingInstanceId: null,
     };
   }
 
@@ -314,28 +379,34 @@ export const updateState = (event, previousState) => {
     return {
       ...previousState,
       isResizing: true,
+      resizingInstanceId: event.instanceId,
       resizeStartX: event.clientX,
       resizeStartY: event.clientY,
-      startW: previousState.w,
-      startH: previousState.h,
+      startW: event.startW !== undefined ? event.startW : previousState.w,
+      startH: event.startH !== undefined ? event.startH : previousState.h,
+      startPosX: event.startPosX !== undefined ? event.startPosX : previousState.x,
+      startPosY: event.startPosY !== undefined ? event.startPosY : previousState.y,
     };
   }
 
-  if (event.type === 'MOVE_RESIZE' && previousState.isResizing) {
+  if (event.type === 'MOVE_RESIZE' && previousState.isResizing && previousState.resizingInstanceId) {
     const deltaW = event.clientX - previousState.resizeStartX;
     const deltaH = event.clientY - previousState.resizeStartY;
 
+    const currentX = previousState.startPosX !== undefined ? previousState.startPosX : previousState.x;
+    const currentY = previousState.startPosY !== undefined ? previousState.startPosY : previousState.y;
+
     const winW = window.innerWidth || 1920;
     const winH = window.innerHeight || 1080;
-    const maxW = Math.max(180, winW - previousState.x);
-    const maxH = Math.max(70, winH - previousState.y);
+    const maxW = Math.max(180, winW - currentX);
+    const maxH = Math.max(70, winH - currentY);
 
     let newW = Math.max(180, Math.min(maxW, previousState.startW + deltaW));
     let newH = Math.max(70, Math.min(maxH, previousState.startH + deltaH));
 
     if (previousState.enableSnapping !== false && !event.bypassSnap && !event.metaKey) {
-      const snapW = winW - previousState.x - SNAP_MARGIN_X;
-      const snapH = winH - previousState.y - SNAP_MARGIN_BOTTOM;
+      const snapW = winW - currentX - SNAP_MARGIN_X;
+      const snapH = winH - currentY - SNAP_MARGIN_BOTTOM;
       if (newW >= snapW - SNAP_THRESHOLD && newW <= snapW + SNAP_EDGE_TOLERANCE && snapW >= 180) {
         newW = snapW;
       }
@@ -344,14 +415,20 @@ export const updateState = (event, previousState) => {
       }
     }
 
-    try {
-      localStorage.setItem(SIZE_KEY, JSON.stringify({ w: newW, h: newH }));
-    } catch (e) {}
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === previousState.resizingInstanceId) {
+        return { ...inst, w: newW, h: newH };
+      }
+      return inst;
+    });
+
+    saveInstances(updatedInstances);
 
     return {
       ...previousState,
-      w: newW,
-      h: newH,
+      instances: updatedInstances,
+      w: updatedInstances[0]?.w ?? newW,
+      h: updatedInstances[0]?.h ?? newH,
     };
   }
 
@@ -359,12 +436,15 @@ export const updateState = (event, previousState) => {
     return {
       ...previousState,
       isResizing: false,
+      resizingInstanceId: null,
     };
   }
 
   if (event.type === 'TOGGLE_SNAPPING') {
     const nextVal = previousState.enableSnapping === false ? true : false;
+    const screenId = getScreenId();
     try {
+      localStorage.setItem(`${STORAGE_SNAP_KEY}_${screenId}`, String(nextVal));
       localStorage.setItem(STORAGE_SNAP_KEY, String(nextVal));
     } catch (e) {}
     return {
@@ -376,14 +456,55 @@ export const updateState = (event, previousState) => {
   if (event.type === 'RESET_POSITION') {
     const defaultX = SNAP_MARGIN_X;
     const defaultY = SNAP_MARGIN_TOP;
-    try {
-      localStorage.setItem(POS_KEY, JSON.stringify({ x: defaultX, y: defaultY }));
-    } catch (e) {}
+    const targetId = event.instanceId;
+    const updatedInstances = (previousState.instances || []).map((i) => {
+      if (i.id === targetId || (!targetId && i.id === (previousState.instances?.[0]?.id || 'default'))) {
+        return { ...i, x: defaultX, y: defaultY };
+      }
+      return i;
+    });
+    saveInstances(updatedInstances);
     return {
       ...previousState,
-      x: defaultX,
-      y: defaultY,
+      instances: updatedInstances,
+      x: updatedInstances[0]?.x ?? defaultX,
+      y: updatedInstances[0]?.y ?? defaultY,
     };
+  }
+
+  if (event.type === 'DUPLICATE_WIDGET') {
+    const current = previousState.instances && previousState.instances.length > 0
+      ? previousState.instances
+      : [{ id: 'default', x: previousState.x || SNAP_MARGIN_X, y: previousState.y || SNAP_MARGIN_TOP, w: previousState.w || 380, h: previousState.h || 140 }];
+    const target = current.find(i => i.id === event.instanceId) || current[current.length - 1];
+    const newInst = {
+      ...target,
+      id: `inst_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+      x: (target.x || SNAP_MARGIN_X) + 30,
+      y: (target.y || SNAP_MARGIN_TOP) + 30,
+    };
+    const updatedInstances = [...current, newInst];
+    saveInstances(updatedInstances);
+    return {
+      ...previousState,
+      instances: updatedInstances,
+    };
+  }
+
+  if (event.type === 'REMOVE_WIDGET') {
+    const current = previousState.instances || [];
+    if (current.length > 1) {
+      const updatedInstances = current.filter(i => i.id !== event.instanceId);
+      saveInstances(updatedInstances);
+      return {
+        ...previousState,
+        instances: updatedInstances,
+      };
+    } else {
+      const wid = event.widgetId || 'cava-widget-index-jsx';
+      run(`osascript -e 'tell application id "tracesOf.Uebersicht" to set hidden of widget id "${wid}" to true'`);
+      return previousState;
+    }
   }
 
   if (event.type === 'ORDER_CHANGED') {
@@ -409,128 +530,19 @@ if (typeof window !== 'undefined' && !window.__uebersicht_order_listener_cava) {
 export const render = (state, dispatch) => {
   currentDispatch = dispatch;
   const {
-    x = 50,
-    y = 380,
-    w = 380,
-    h = 140,
-    isDragging,
-    isResizing,
     enableSnapping = true,
     bars = [],
   } = state || {};
 
-  const handleMouseDown = (e) => {
-    if (e.button !== 0) return;
-    if (e.target.closest('[data-no-drag="true"]')) return;
-
-    e.preventDefault();
-    dispatch({ type: 'START_DRAG', clientX: e.clientX, clientY: e.clientY });
-
-    const onMouseMove = (moveEvent) => {
-      dispatch({
-        type: 'MOVE_DRAG',
-        clientX: moveEvent.clientX,
-        clientY: moveEvent.clientY,
-        bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
-      });
-    };
-
-    const onMouseUp = () => {
-      dispatch({ type: 'END_DRAG' });
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    };
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  };
-
-  const handleResizeStart = (e) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    e.stopPropagation();
-
-    dispatch({ type: 'START_RESIZE', clientX: e.clientX, clientY: e.clientY });
-
-    const onMouseMove = (moveEvent) => {
-      dispatch({
-        type: 'MOVE_RESIZE',
-        clientX: moveEvent.clientX,
-        clientY: moveEvent.clientY,
-        bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
-      });
-    };
-
-    const onMouseUp = () => {
-      dispatch({ type: 'END_RESIZE' });
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    };
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  };
-
-  const handleContextMenu = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    const payload = JSON.stringify({
-      enableSnapping: enableSnapping !== false,
-      x: Math.round(x),
-      y: Math.round(y),
-    });
-
-    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/cava.widget/menu_helper';
-    const fallbackPath = './cava.widget/menu_helper';
-    const escapedPayload = payload.replace(/'/g, "'\\''");
-    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
-
-    run(cmd, (err, output) => {
-      if (err || !output) return;
-      try {
-        const res = JSON.parse(output.trim());
-        if (!res || !res.action) return;
-
-        if (res.action === 'TOGGLE_SNAPPING') {
-          dispatch({ type: 'TOGGLE_SNAPPING' });
-        } else if (res.action === 'RESET_POSITION') {
-          dispatch({ type: 'RESET_POSITION' });
-        } else if (res.action === 'RELOAD_WIDGET') {
-          const wid = res.widgetId || 'cava-widget-index-jsx';
-          run(`osascript -e 'tell application id "tracesOf.Uebersicht" to reload widget id "${wid}"' 2>/dev/null || osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
-        } else if (res.action === 'REMOVE_WIDGET') {
-          const wid = res.widgetId || 'cava-widget-index-jsx';
-          const dir = res.widgetDir || '';
-          const folder = res.widgetFolder || '';
-          const isDuplicate = /(-copy|\bcopy\b|-\d+)\.widget$/i.test(folder);
-          if (isDuplicate && dir) {
-            run(`osascript -e 'tell application "Finder" to delete POSIX file "${dir}"'`);
-          } else {
-            run(`osascript -e 'tell application id "tracesOf.Uebersicht" to set hidden of widget id "${wid}" to true'`);
-          }
-        } else if (res.action === 'DUPLICATE_WIDGET') {
-          run(`osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
-        } else if (res.action === 'ORDER_FRONT' || res.action === 'ORDER_FORWARD' || res.action === 'ORDER_BACKWARD' || res.action === 'ORDER_BACK') {
-          reorderWidget('cava', res.action);
-          dispatch({ type: 'ORDER_CHANGED' });
-        }
-      } catch (parseErr) {}
-    });
-  };
-
-  const positionStyle = {
-    position: 'absolute',
-    top: `${y}px`,
-    left: `${x}px`,
-    width: `${w}px`,
-    height: `${h}px`,
-    zIndex: isDragging ? 9999 : getWidgetZIndex('cava'),
-    cursor: isDragging ? 'grabbing' : isResizing ? 'se-resize' : 'grab',
-    userSelect: 'none',
-    WebkitUserSelect: 'none',
-    boxSizing: 'border-box',
-  };
+  const instances = (state && state.instances && state.instances.length > 0)
+    ? state.instances
+    : [{
+        id: 'default',
+        x: state?.x ?? SNAP_MARGIN_X,
+        y: state?.y ?? SNAP_MARGIN_TOP,
+        w: state?.w ?? 380,
+        h: state?.h ?? 140,
+      }];
 
   const barsData = bars.length > 0 ? bars : new Array(DEFAULT_BARS_COUNT).fill(0);
   const minHeight = typeof settings.minBarHeightPct === 'number' ? settings.minBarHeightPct : 2;
@@ -540,67 +552,202 @@ export const render = (state, dispatch) => {
   const radiusPx = settings.barCornerRadius || 0;
 
   return (
-    <div style={positionStyle} onMouseDown={handleMouseDown} onContextMenu={handleContextMenu}>
-      <div style={windowStyle}>
-        {/* Optional Title Bar (hidden by default) */}
-        {settings.showTitleBar && (
-          <div style={titleBarStyle}>
-            <div style={trafficLightsStyle}>
-              <span style={{ ...dotStyle, backgroundColor: '#ff5f56' }} />
-              <span style={{ ...dotStyle, backgroundColor: '#ffbd2e' }} />
-              <span style={{ ...dotStyle, backgroundColor: '#27c93f' }} />
-            </div>
-            <div style={titleTextStyle}>{settings.title || 'cava'}</div>
-            <div style={statusLabelStyle}>tap</div>
-          </div>
-        )}
+    <React.Fragment>
+      {instances.map((instance) => {
+        const x = instance.x ?? 50;
+        const y = instance.y ?? 380;
+        const w = instance.w ?? 380;
+        const h = instance.h ?? 140;
+        const isDragging = state?.isDragging && state?.draggingInstanceId === instance.id;
+        const isResizing = state?.isResizing && state?.resizingInstanceId === instance.id;
 
-        {/* Terminal Visualizer Body with Fixed Vertical Row-Banded Regions */}
-        <div style={terminalBodyStyle}>
-          <div style={{ ...barsContainerStyle, gap: `${gapPx}px` }}>
-            {barsData.map((val, idx) => {
-              // Calculate clipped percentage from top:
-              // Fixed gradient spans 100% of height across all interpolated terminal rows.
-              const heightPct = Math.max(minHeight, Math.min(100, val));
-              const clipTop = (100 - heightPct).toFixed(2);
-              const clipStyle = radiusPx > 0
-                ? `inset(${clipTop}% 0 0 0 round ${radiusPx}px ${radiusPx}px 0 0)`
-                : `inset(${clipTop}% 0 0 0)`;
+        const handleMouseDown = (e) => {
+          if (e.button !== 0) return;
+          if (e.target.closest('[data-no-drag="true"]')) return;
 
-              return (
-                <div key={idx} style={barColumnStyle}>
-                  <div
-                    style={{
-                      ...barFillStyle,
-                      background: gradientCss,
-                      clipPath: clipStyle,
-                      WebkitClipPath: clipStyle,
-                      filter: settings.enableGlow
-                        ? `drop-shadow(0 0 4px ${theme.gradient[0] || '#59cc33'})`
-                        : 'none',
-                    }}
-                  />
+          e.preventDefault();
+          dispatch({
+            type: 'START_DRAG',
+            instanceId: instance.id,
+            clientX: e.clientX,
+            clientY: e.clientY,
+            startPosX: x,
+            startPosY: y,
+            w,
+            h,
+          });
+
+          const onMouseMove = (moveEvent) => {
+            dispatch({
+              type: 'MOVE_DRAG',
+              clientX: moveEvent.clientX,
+              clientY: moveEvent.clientY,
+              bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
+            });
+          };
+
+          const onMouseUp = () => {
+            dispatch({ type: 'END_DRAG' });
+            window.removeEventListener('mousemove', onMouseMove);
+            window.removeEventListener('mouseup', onMouseUp);
+          };
+
+          window.addEventListener('mousemove', onMouseMove);
+          window.addEventListener('mouseup', onMouseUp);
+        };
+
+        const handleResizeStart = (e) => {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          e.stopPropagation();
+
+          dispatch({
+            type: 'START_RESIZE',
+            instanceId: instance.id,
+            clientX: e.clientX,
+            clientY: e.clientY,
+            startW: w,
+            startH: h,
+            startPosX: x,
+            startPosY: y,
+          });
+
+          const onMouseMove = (moveEvent) => {
+            dispatch({
+              type: 'MOVE_RESIZE',
+              clientX: moveEvent.clientX,
+              clientY: moveEvent.clientY,
+              bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
+            });
+          };
+
+          const onMouseUp = () => {
+            dispatch({ type: 'END_RESIZE' });
+            window.removeEventListener('mousemove', onMouseMove);
+            window.removeEventListener('mouseup', onMouseUp);
+          };
+
+          window.addEventListener('mousemove', onMouseMove);
+          window.addEventListener('mouseup', onMouseUp);
+        };
+
+        const handleContextMenu = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+
+          const payload = JSON.stringify({
+            instanceId: instance.id,
+            enableSnapping: enableSnapping !== false,
+            x: Math.round(x),
+            y: Math.round(y),
+          });
+
+          const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/cava.widget/menu_helper';
+          const fallbackPath = './cava.widget/menu_helper';
+          const escapedPayload = payload.replace(/'/g, "'\\''");
+          const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+
+          run(cmd, (err, output) => {
+            if (err || !output) return;
+            try {
+              const res = JSON.parse(output.trim());
+              if (!res || !res.action) return;
+
+              if (res.action === 'TOGGLE_SNAPPING') {
+                dispatch({ type: 'TOGGLE_SNAPPING' });
+              } else if (res.action === 'RESET_POSITION') {
+                dispatch({ type: 'RESET_POSITION', instanceId: res.instanceId || instance.id });
+              } else if (res.action === 'RELOAD_WIDGET') {
+                const wid = res.widgetId || 'cava-widget-index-jsx';
+                run(`osascript -e 'tell application id "tracesOf.Uebersicht" to reload widget id "${wid}"' 2>/dev/null || osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
+              } else if (res.action === 'REMOVE_WIDGET') {
+                dispatch({ type: 'REMOVE_WIDGET', instanceId: res.instanceId || instance.id, widgetId: res.widgetId || 'cava-widget-index-jsx' });
+              } else if (res.action === 'DUPLICATE_WIDGET') {
+                dispatch({ type: 'DUPLICATE_WIDGET', instanceId: res.instanceId || instance.id });
+              } else if (res.action === 'ORDER_FRONT' || res.action === 'ORDER_FORWARD' || res.action === 'ORDER_BACKWARD' || res.action === 'ORDER_BACK') {
+                reorderWidget('cava', res.action);
+                dispatch({ type: 'ORDER_CHANGED' });
+              }
+            } catch (parseErr) {}
+          });
+        };
+
+        const positionStyle = {
+          position: 'absolute',
+          top: `${y}px`,
+          left: `${x}px`,
+          width: `${w}px`,
+          height: `${h}px`,
+          zIndex: isDragging ? 9999 : getWidgetZIndex('cava'),
+          cursor: isDragging ? 'grabbing' : isResizing ? 'se-resize' : 'grab',
+          userSelect: 'none',
+          WebkitUserSelect: 'none',
+          boxSizing: 'border-box',
+        };
+
+        return (
+          <div key={instance.id} style={positionStyle} onMouseDown={handleMouseDown} onContextMenu={handleContextMenu}>
+            <div style={windowStyle}>
+              {/* Optional Title Bar (hidden by default) */}
+              {settings.showTitleBar && (
+                <div style={titleBarStyle}>
+                  <div style={trafficLightsStyle}>
+                    <span style={{ ...dotStyle, backgroundColor: '#ff5f56' }} />
+                    <span style={{ ...dotStyle, backgroundColor: '#ffbd2e' }} />
+                    <span style={{ ...dotStyle, backgroundColor: '#27c93f' }} />
+                  </div>
+                  <div style={titleTextStyle}>{settings.title || 'cava'}</div>
+                  <div style={statusLabelStyle}>tap</div>
                 </div>
-              );
-            })}
-          </div>
-        </div>
+              )}
 
-        {/* Resize Handle */}
-        <div
-          data-no-drag="true"
-          style={resizeHandleStyle}
-          onMouseDown={handleResizeStart}
-          title="Drag to resize"
-        >
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-            <circle cx="8" cy="8" r="1" fill="rgba(255,255,255,0.35)" />
-            <circle cx="8" cy="4" r="1" fill="rgba(255,255,255,0.35)" />
-            <circle cx="4" cy="8" r="1" fill="rgba(255,255,255,0.35)" />
-          </svg>
-        </div>
-      </div>
-    </div>
+              {/* Terminal Visualizer Body with Fixed Vertical Row-Banded Regions */}
+              <div style={terminalBodyStyle}>
+                <div style={{ ...barsContainerStyle, gap: `${gapPx}px` }}>
+                  {barsData.map((val, idx) => {
+                    const heightPct = Math.max(minHeight, Math.min(100, val));
+                    const clipTop = (100 - heightPct).toFixed(2);
+                    const clipStyle = radiusPx > 0
+                      ? `inset(${clipTop}% 0 0 0 round ${radiusPx}px ${radiusPx}px 0 0)`
+                      : `inset(${clipTop}% 0 0 0)`;
+
+                    return (
+                      <div key={idx} style={barColumnStyle}>
+                        <div
+                          style={{
+                            ...barFillStyle,
+                            background: gradientCss,
+                            clipPath: clipStyle,
+                            WebkitClipPath: clipStyle,
+                            filter: settings.enableGlow
+                              ? `drop-shadow(0 0 4px ${theme.gradient[0] || '#59cc33'})`
+                              : 'none',
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Resize Handle */}
+              <div
+                data-no-drag="true"
+                style={resizeHandleStyle}
+                onMouseDown={handleResizeStart}
+                title="Drag to resize"
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                  <circle cx="8" cy="8" r="1" fill="rgba(255,255,255,0.35)" />
+                  <circle cx="8" cy="4" r="1" fill="rgba(255,255,255,0.35)" />
+                  <circle cx="4" cy="8" r="1" fill="rgba(255,255,255,0.35)" />
+                </svg>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </React.Fragment>
   );
 };
 
