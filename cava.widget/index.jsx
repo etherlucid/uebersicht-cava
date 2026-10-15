@@ -1,4 +1,4 @@
-import { React } from 'uebersicht';
+import { React, run } from 'uebersicht';
 import { theme, settings } from './lib/config.js';
 
 export const refreshFrequency = 60; // Poll bridge every 60ms (~16 FPS)
@@ -7,14 +7,79 @@ export const command = `python3 "$HOME/Library/Application Support/Übersicht/wi
 
 const POS_KEY = 'cava_widget_position';
 const SIZE_KEY = 'cava_widget_size';
+const STORAGE_SNAP_KEY = 'cava_widget_enable_snap';
 const SCREEN_MARGIN = 0;
 const SNAP_THRESHOLD = settings.snapThreshold !== undefined ? settings.snapThreshold : 6;
 const SNAP_EDGE_TOLERANCE = 3;
 const SNAP_MARGIN_X = settings.snapMarginX !== undefined ? settings.snapMarginX : 15;
 const SNAP_MARGIN_TOP = settings.snapMarginTop !== undefined ? settings.snapMarginTop : 14;
 const SNAP_MARGIN_BOTTOM = settings.snapMarginBottom !== undefined ? settings.snapMarginBottom : 14;
-const ENABLE_SNAPPING = settings.enableSnapping !== undefined ? settings.enableSnapping : true;
 const DEFAULT_BARS_COUNT = settings.barsCount || 28;
+
+const WIDGET_ORDER_KEY = 'uebersicht_widget_order';
+const DEFAULT_WIDGET_ORDER = ['sticker', 'cava', 'shell', 'nowplaying'];
+
+const getWidgetZIndex = (widgetId) => {
+  try {
+    const raw = localStorage.getItem(WIDGET_ORDER_KEY);
+    let order = raw ? JSON.parse(raw) : [...DEFAULT_WIDGET_ORDER];
+    if (!Array.isArray(order)) order = [...DEFAULT_WIDGET_ORDER];
+    let idx = order.indexOf(widgetId);
+    if (idx === -1) {
+      order.push(widgetId);
+      localStorage.setItem(WIDGET_ORDER_KEY, JSON.stringify(order));
+      idx = order.length - 1;
+    }
+    return 100 + idx * 50;
+  } catch (e) {
+    return 100;
+  }
+};
+
+const reorderWidget = (widgetId, action) => {
+  try {
+    const raw = localStorage.getItem(WIDGET_ORDER_KEY);
+    let order = raw ? JSON.parse(raw) : [...DEFAULT_WIDGET_ORDER];
+    if (!Array.isArray(order)) order = [...DEFAULT_WIDGET_ORDER];
+    if (!order.includes(widgetId)) {
+      order.push(widgetId);
+    }
+    const idx = order.indexOf(widgetId);
+    if (action === 'ORDER_FRONT' || action === 'BRING_TO_FRONT') {
+      order.splice(idx, 1);
+      order.push(widgetId);
+    } else if (action === 'ORDER_BACK' || action === 'SEND_TO_BACK') {
+      order.splice(idx, 1);
+      order.unshift(widgetId);
+    } else if (action === 'ORDER_FORWARD' || action === 'BRING_FORWARD') {
+      if (idx < order.length - 1) {
+        const temp = order[idx];
+        order[idx] = order[idx + 1];
+        order[idx + 1] = temp;
+      }
+    } else if (action === 'ORDER_BACKWARD' || action === 'SEND_BACKWARD') {
+      if (idx > 0) {
+        const temp = order[idx];
+        order[idx] = order[idx - 1];
+        order[idx - 1] = temp;
+      }
+    }
+    localStorage.setItem(WIDGET_ORDER_KEY, JSON.stringify(order));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('uebersicht:order-changed', { detail: { order } }));
+    }
+  } catch (e) {}
+};
+
+const getInitialSnapping = () => {
+  try {
+    const saved = localStorage.getItem(STORAGE_SNAP_KEY);
+    if (saved !== null) {
+      return saved === 'true';
+    }
+  } catch (e) {}
+  return settings.enableSnapping !== undefined ? settings.enableSnapping : true;
+};
 
 const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap = false) => {
   const winW = window.innerWidth || 1920;
@@ -26,7 +91,7 @@ const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap 
   let newX = Math.max(0, Math.min(maxX, rawX));
   let newY = Math.max(0, Math.min(maxY, rawY));
 
-  if (ENABLE_SNAPPING && !bypassSnap) {
+  if (!bypassSnap) {
     const snapTop = SNAP_MARGIN_TOP;
     const snapBottom = Math.max(0, winH - cardHeight - SNAP_MARGIN_BOTTOM);
     const snapLeft = SNAP_MARGIN_X;
@@ -171,6 +236,7 @@ export const initialState = {
   y: initialPos.y,
   w: initialSize.w,
   h: initialSize.h,
+  enableSnapping: getInitialSnapping(),
   isDragging: false,
   isResizing: false,
   dragStartX: 0,
@@ -217,7 +283,7 @@ export const updateState = (event, previousState) => {
     const deltaX = event.clientX - previousState.dragStartX;
     const deltaY = event.clientY - previousState.dragStartY;
 
-    const bypassSnap = event.bypassSnap || event.metaKey;
+    const bypassSnap = previousState.enableSnapping === false || event.bypassSnap || event.metaKey;
     const { x: newX, y: newY } = calculateSnappedPosition(
       previousState.startPosX + deltaX,
       previousState.startPosY + deltaY,
@@ -267,7 +333,7 @@ export const updateState = (event, previousState) => {
     let newW = Math.max(180, Math.min(maxW, previousState.startW + deltaW));
     let newH = Math.max(70, Math.min(maxH, previousState.startH + deltaH));
 
-    if (ENABLE_SNAPPING && !event.bypassSnap && !event.metaKey) {
+    if (previousState.enableSnapping !== false && !event.bypassSnap && !event.metaKey) {
       const snapW = winW - previousState.x - SNAP_MARGIN_X;
       const snapH = winH - previousState.y - SNAP_MARGIN_BOTTOM;
       if (newW >= snapW - SNAP_THRESHOLD && newW <= snapW + SNAP_EDGE_TOLERANCE && snapW >= 180) {
@@ -296,10 +362,52 @@ export const updateState = (event, previousState) => {
     };
   }
 
+  if (event.type === 'TOGGLE_SNAPPING') {
+    const nextVal = previousState.enableSnapping === false ? true : false;
+    try {
+      localStorage.setItem(STORAGE_SNAP_KEY, String(nextVal));
+    } catch (e) {}
+    return {
+      ...previousState,
+      enableSnapping: nextVal,
+    };
+  }
+
+  if (event.type === 'RESET_POSITION') {
+    const defaultX = SNAP_MARGIN_X;
+    const defaultY = SNAP_MARGIN_TOP;
+    try {
+      localStorage.setItem(POS_KEY, JSON.stringify({ x: defaultX, y: defaultY }));
+    } catch (e) {}
+    return {
+      ...previousState,
+      x: defaultX,
+      y: defaultY,
+    };
+  }
+
+  if (event.type === 'ORDER_CHANGED') {
+    return {
+      ...previousState,
+      orderTick: Date.now(),
+    };
+  }
+
   return previousState;
 };
 
+let currentDispatch = null;
+if (typeof window !== 'undefined' && !window.__uebersicht_order_listener_cava) {
+  window.__uebersicht_order_listener_cava = true;
+  window.addEventListener('uebersicht:order-changed', () => {
+    if (currentDispatch) {
+      currentDispatch({ type: 'ORDER_CHANGED' });
+    }
+  });
+}
+
 export const render = (state, dispatch) => {
+  currentDispatch = dispatch;
   const {
     x = 50,
     y = 380,
@@ -307,6 +415,7 @@ export const render = (state, dispatch) => {
     h = 140,
     isDragging,
     isResizing,
+    enableSnapping = true,
     bars = [],
   } = state || {};
 
@@ -362,13 +471,44 @@ export const render = (state, dispatch) => {
     window.addEventListener('mouseup', onMouseUp);
   };
 
+  const handleContextMenu = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const payload = JSON.stringify({
+      enableSnapping: enableSnapping !== false,
+    });
+
+    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/cava.widget/menu_helper';
+    const fallbackPath = './cava.widget/menu_helper';
+    const escapedPayload = payload.replace(/'/g, "'\\''");
+    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+
+    run(cmd, (err, output) => {
+      if (err || !output) return;
+      try {
+        const res = JSON.parse(output.trim());
+        if (!res || !res.action) return;
+
+        if (res.action === 'TOGGLE_SNAPPING') {
+          dispatch({ type: 'TOGGLE_SNAPPING' });
+        } else if (res.action === 'RESET_POSITION') {
+          dispatch({ type: 'RESET_POSITION' });
+        } else if (res.action === 'ORDER_FRONT' || res.action === 'ORDER_FORWARD' || res.action === 'ORDER_BACKWARD' || res.action === 'ORDER_BACK') {
+          reorderWidget('cava', res.action);
+          dispatch({ type: 'ORDER_CHANGED' });
+        }
+      } catch (parseErr) {}
+    });
+  };
+
   const positionStyle = {
     position: 'absolute',
     top: `${y}px`,
     left: `${x}px`,
     width: `${w}px`,
     height: `${h}px`,
-    zIndex: 997,
+    zIndex: isDragging ? 9999 : getWidgetZIndex('cava'),
     cursor: isDragging ? 'grabbing' : isResizing ? 'se-resize' : 'grab',
     userSelect: 'none',
     WebkitUserSelect: 'none',
@@ -383,7 +523,7 @@ export const render = (state, dispatch) => {
   const radiusPx = settings.barCornerRadius || 0;
 
   return (
-    <div style={positionStyle} onMouseDown={handleMouseDown}>
+    <div style={positionStyle} onMouseDown={handleMouseDown} onContextMenu={handleContextMenu}>
       <div style={windowStyle}>
         {/* Optional Title Bar (hidden by default) */}
         {settings.showTitleBar && (
