@@ -30,13 +30,6 @@ let delegate = MenuDelegate()
 let menu = NSMenu(title: "CAVA Controls")
 menu.autoenablesItems = false
 
-// Header Item
-let header = NSMenuItem(title: "📊 Audio Visualizer (CAVA)", action: nil, keyEquivalent: "")
-header.isEnabled = false
-menu.addItem(header)
-
-menu.addItem(NSMenuItem.separator())
-
 // Order Submenu
 let orderParent = NSMenuItem(title: "Order", action: nil, keyEquivalent: "")
 let orderMenu = NSMenu(title: "Order")
