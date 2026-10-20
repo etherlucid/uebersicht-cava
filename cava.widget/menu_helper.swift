@@ -84,6 +84,12 @@ resetItem.target = delegate
 resetItem.representedObject = "{\"action\":\"RESET_POSITION\",\"instanceId\":\"\(instanceId)\"}"
 menu.addItem(resetItem)
 
+// Snap Widgets to External Display
+let snapDisplayItem = NSMenuItem(title: "🖥️ Snap Widgets to External Display", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+snapDisplayItem.target = delegate
+snapDisplayItem.representedObject = "{\"action\":\"SNAP_TO_EXTERNAL_DISPLAY\"}"
+menu.addItem(snapDisplayItem)
+
 // Reload Widget
 let reloadItem = NSMenuItem(title: "Reload Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
 reloadItem.target = delegate
@@ -113,6 +119,11 @@ if let action = delegate.outputAction {
        let act = json["action"] as? String {
         if act == "RELOAD_WIDGET" {
             reloadWidget(widgetId: widgetId)
+        } else if act == "SNAP_TO_EXTERNAL_DISPLAY" {
+            let syncTool = URL(fileURLWithPath: helperPath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("display_sync").path
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: syncTool)
+            try? task.run()
         }
     }
 }
