@@ -1,9 +1,9 @@
 import { React, run } from 'uebersicht';
 import { theme, settings } from './lib/config.js';
 
-export const refreshFrequency = 60; // Poll bridge every 60ms (~16 FPS)
+export const refreshFrequency = 40; // Poll bridge every 40ms (~25 FPS)
 
-export const command = `python3 "$HOME/Library/Application Support/Übersicht/widgets/cava.widget/cava_bridge.py" 2>/dev/null || python3 "cava.widget/cava_bridge.py" 2>/dev/null`;
+export const command = `"$HOME/Library/Application Support/Übersicht/widgets/cava.widget/cava_poll" "$HOME/Library/Application Support/Übersicht/widgets/cava.widget/cava_bridge.py" 2>/dev/null || ./cava.widget/cava_poll 2>/dev/null || python3 "$HOME/Library/Application Support/Übersicht/widgets/cava.widget/cava_bridge.py" 2>/dev/null`;
 
 const POS_KEY = 'cava_widget_position';
 const SIZE_KEY = 'cava_widget_size';
@@ -306,7 +306,7 @@ export const initialState = {
 export const updateState = (event, previousState) => {
   if (!previousState) return initialState;
 
-  // Handle stdout from cava_bridge.py
+  // Handle stdout from cava_poll / cava_bridge.py
   if (event.output && typeof event.output === 'string') {
     const parts = event.output.trim().split(';').filter(Boolean);
     if (parts.length > 0) {
@@ -314,6 +314,21 @@ export const updateState = (event, previousState) => {
         const num = parseInt(val, 10);
         return isNaN(num) ? 0 : Math.max(0, Math.min(100, num));
       });
+
+      // Avoid unnecessary React re-renders if bars haven't changed (e.g. idle/silent)
+      if (previousState.bars && previousState.bars.length === parsedBars.length) {
+        let changed = false;
+        for (let i = 0; i < parsedBars.length; i++) {
+          if (parsedBars[i] !== previousState.bars[i]) {
+            changed = true;
+            break;
+          }
+        }
+        if (!changed) {
+          return previousState;
+        }
+      }
+
       return {
         ...previousState,
         bars: parsedBars,
@@ -838,7 +853,8 @@ const barColumnStyle = {
 const barFillStyle = {
   width: '100%',
   height: '100%',
-  transition: 'clip-path 0.055s ease-out, -webkit-clip-path 0.055s ease-out',
+  transition: 'clip-path 0.04s ease-out, -webkit-clip-path 0.04s ease-out',
+  willChange: 'clip-path',
 };
 
 const resizeHandleStyle = {

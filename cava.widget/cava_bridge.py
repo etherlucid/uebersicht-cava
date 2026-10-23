@@ -21,7 +21,7 @@ def write_config():
     config = f"""
 [general]
 bars = {NUM_BARS}
-framerate = 35
+framerate = 50
 autosens = 1
 overshoot = 20
 
@@ -112,8 +112,8 @@ def run_worker():
                     hb_mtime = os.path.getmtime(HEARTBEAT_FILE)
                 except Exception:
                     pass
-                # If no poll for 6 seconds, exit cleanly
-                if now - hb_mtime > 6.0:
+                # If no poll for 30 seconds, exit cleanly
+                if now - hb_mtime > 30.0:
                     break
 
     except Exception:
