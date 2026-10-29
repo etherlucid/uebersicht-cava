@@ -219,7 +219,44 @@ const getScreenId = () => {
       return `screen_${window.screen.width}x${window.screen.height}`;
     }
   } catch (e) {}
-  return 'screen_0';
+  return 'screen_3';
+};
+
+const isMainScreen = (screenId) => {
+  if (screenId === 'screen_3' || screenId === 'screen_0') return true;
+  if (typeof window !== 'undefined') {
+    if (window.screen && window.screen.width === 2560) return true;
+    if (window.innerWidth === 2560) return true;
+  }
+  return false;
+};
+
+const isSecondaryScreen = (screenId) => {
+  if (screenId === 'screen_2' || screenId === 'screen_1') return true;
+  if (typeof window !== 'undefined') {
+    if (window.screen && (window.screen.width === 1080 || window.screen.height === 1920)) return true;
+    if (window.innerWidth === 1080 || window.innerHeight === 1920) return true;
+  }
+  return false;
+};
+
+const isScreenActive = (currentScreenId, activeScreen) => {
+  if (!activeScreen) return isMainScreen(currentScreenId);
+  if (activeScreen === currentScreenId) return true;
+  if (activeScreen === 'all') return true;
+
+  const isTargetMain = (activeScreen === 'screen_0' || activeScreen === 'screen_3' || activeScreen.includes('2560'));
+  if (isTargetMain && isMainScreen(currentScreenId)) return true;
+
+  const isTargetSecondary = (activeScreen === 'screen_1' || activeScreen === 'screen_2' || activeScreen.includes('1080x1920'));
+  if (isTargetSecondary && isSecondaryScreen(currentScreenId)) return true;
+
+  // Failsafe: if activeScreen matches neither monitor, ALWAYS show on main monitor so widget is NEVER permanently lost
+  if (!isTargetMain && !isTargetSecondary && isMainScreen(currentScreenId)) {
+    return true;
+  }
+
+  return false;
 };
 
 const getActiveScreen = () => {
@@ -227,7 +264,7 @@ const getActiveScreen = () => {
     const saved = localStorage.getItem(STORAGE_ACTIVE_SCREEN_KEY);
     if (saved) return saved;
   } catch (e) {}
-  return 'screen_1';
+  return 'screen_3';
 };
 
 const getInitialInstances = () => {
@@ -413,17 +450,18 @@ export const updateState = (event, previousState) => {
     const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
     const winH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
     const currentScreenId = getScreenId();
+    const isMain = isMainScreen(currentScreenId);
 
     let targetScreen = previousState.activeScreen || currentScreenId;
     let finalX = curX;
     let finalY = Math.max(14, Math.min(winH - cardH - 14, curY));
 
-    // Monitor arrangement: screen_0 (LG WFHD, left, 2560x1080) <-> screen_1 (ASUS PB287Q, right, 1080x1920)
-    if (currentScreenId === 'screen_0' && curX + (cardW / 3) > winW) {
-      targetScreen = 'screen_1';
+    // Monitor arrangement: Main (LG WFHD, left, 2560x1080, screen_3) <-> Secondary (ASUS PB287Q, right, 1080x1920, screen_2)
+    if (isMain && curX + (cardW / 3) > winW) {
+      targetScreen = 'screen_2';
       finalX = 14;
-    } else if (currentScreenId === 'screen_1' && curX < -(cardW / 3)) {
-      targetScreen = 'screen_0';
+    } else if (!isMain && curX < -(cardW / 3)) {
+      targetScreen = 'screen_3';
       finalX = Math.max(14, 2560 - cardW - 14);
     } else {
       finalX = Math.max(0, Math.min(winW - cardW, curX));
@@ -719,7 +757,7 @@ export const render = (state, dispatch) => {
   const currentScreenId = getScreenId();
   const activeScreen = state?.activeScreen || getActiveScreen();
 
-  if (currentScreenId !== activeScreen) {
+  if (!isScreenActive(currentScreenId, activeScreen)) {
     return <div style={{ display: 'none' }} />;
   }
   const {

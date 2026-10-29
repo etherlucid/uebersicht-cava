@@ -116,14 +116,19 @@ if screens.count > 1 {
     let dispParent = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
     let dispMenu = NSMenu(title: "Display")
     dispMenu.autoenablesItems = false
-    let currentScreen = state.screenId ?? "screen_1"
+    let currentScreen = state.screenId ?? ""
     for (i, s) in screens.enumerated() {
-        let sid = "screen_\(i)"
+        let desc = s.deviceDescription
+        let screenNumber = desc[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+        let sid = "screen_\(screenNumber)"
         let label = s.localizedName.isEmpty ? "Display \(i + 1)" : s.localizedName
         let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
         item.target = delegate
         item.representedObject = "{\"action\":\"MOVE_TO_SCREEN\",\"screenId\":\"\(sid)\",\"instanceId\":\"\(instanceId)\"}"
-        if currentScreen == sid {
+        let isCurrent = (currentScreen == sid) ||
+                        ((currentScreen == "screen_0" || currentScreen == "screen_3") && s == NSScreen.main) ||
+                        ((currentScreen == "screen_1" || currentScreen == "screen_2") && s != NSScreen.main)
+        if isCurrent {
             item.state = .on
         }
         dispMenu.addItem(item)
