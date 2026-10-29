@@ -81,17 +81,17 @@ const getInitialSnapping = () => {
   return settings.enableSnapping !== undefined ? settings.enableSnapping : true;
 };
 
-const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap = false) => {
+const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap = false, allowOverflow = true) => {
   const winW = window.innerWidth || 1920;
   const winH = window.innerHeight || 1080;
 
   const maxX = Math.max(0, winW - cardWidth);
   const maxY = Math.max(0, winH - cardHeight);
 
-  let newX = Math.max(0, Math.min(maxX, rawX));
+  let newX = allowOverflow ? rawX : Math.max(0, Math.min(maxX, rawX));
   let newY = Math.max(0, Math.min(maxY, rawY));
 
-  if (!bypassSnap) {
+  if (!bypassSnap && newX >= 0 && newX <= maxX) {
     const snapTop = SNAP_MARGIN_TOP;
     const snapBottom = Math.max(0, winH - cardHeight - SNAP_MARGIN_BOTTOM);
     const snapLeft = SNAP_MARGIN_X;
@@ -194,12 +194,23 @@ function getGradientCss(colors, mode, bandCount = 24) {
   return `linear-gradient(to top, ${colors.join(', ')})`;
 }
 
+const STORAGE_ACTIVE_SCREEN_KEY = 'cava_active_screen';
+
+let syncChannel = null;
+try {
+  if (typeof BroadcastChannel !== 'undefined') {
+    syncChannel = new BroadcastChannel('uebersicht_multi_screen_sync');
+  }
+} catch (e) {}
+
 const getScreenId = () => {
   try {
     if (typeof window !== 'undefined' && window.location && window.location.pathname) {
-      const parts = window.location.pathname.split('/');
-      if (parts[1] !== undefined && parts[1] !== '') {
-        return `screen_${parts[1]}`;
+      const match = window.location.pathname.match(/\/(\d+)/);
+      if (match) return `screen_${match[1]}`;
+      const parts = window.location.pathname.split('/').filter(Boolean);
+      if (parts.length > 0 && !isNaN(Number(parts[0]))) {
+        return `screen_${parts[0]}`;
       }
     }
   } catch (e) {}
@@ -209,6 +220,14 @@ const getScreenId = () => {
     }
   } catch (e) {}
   return 'screen_0';
+};
+
+const getActiveScreen = () => {
+  try {
+    const saved = localStorage.getItem(STORAGE_ACTIVE_SCREEN_KEY);
+    if (saved) return saved;
+  } catch (e) {}
+  return 'screen_1';
 };
 
 const getInitialInstances = () => {
@@ -283,6 +302,7 @@ const initialInstances = getInitialInstances();
 
 export const initialState = {
   instances: initialInstances,
+  activeScreen: getActiveScreen(),
   x: initialInstances[0]?.x ?? SNAP_MARGIN_X,
   y: initialInstances[0]?.y ?? SNAP_MARGIN_TOP,
   w: initialInstances[0]?.w ?? 380,
@@ -383,10 +403,118 @@ export const updateState = (event, previousState) => {
   }
 
   if (event.type === 'END_DRAG') {
+    const draggingId = previousState.draggingInstanceId;
+    const currentInst = (previousState.instances || []).find((i) => i.id === draggingId) || previousState.instances?.[0];
+    const cardW = previousState.startW || previousState.w || 380;
+    const cardH = previousState.startH || previousState.h || 140;
+    const curX = currentInst?.x ?? previousState.x ?? 0;
+    const curY = currentInst?.y ?? previousState.y ?? 0;
+
+    const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
+    const winH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
+    const currentScreenId = getScreenId();
+
+    let targetScreen = previousState.activeScreen || currentScreenId;
+    let finalX = curX;
+    let finalY = Math.max(14, Math.min(winH - cardH - 14, curY));
+
+    // Monitor arrangement: screen_0 (LG WFHD, left, 2560x1080) <-> screen_1 (ASUS PB287Q, right, 1080x1920)
+    if (currentScreenId === 'screen_0' && curX + (cardW / 3) > winW) {
+      targetScreen = 'screen_1';
+      finalX = 14;
+    } else if (currentScreenId === 'screen_1' && curX < -(cardW / 3)) {
+      targetScreen = 'screen_0';
+      finalX = Math.max(14, 2560 - cardW - 14);
+    } else {
+      finalX = Math.max(0, Math.min(winW - cardW, curX));
+    }
+
+    try {
+      localStorage.setItem(STORAGE_ACTIVE_SCREEN_KEY, targetScreen);
+    } catch (e) {}
+
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (!draggingId || inst.id === draggingId) {
+        return { ...inst, x: finalX, y: finalY };
+      }
+      return inst;
+    });
+
+    saveInstances(updatedInstances);
+
+    if (syncChannel) {
+      syncChannel.postMessage({
+        widget: 'cava',
+        type: 'ACTIVE_SCREEN_CHANGED',
+        activeScreen: targetScreen,
+        x: finalX,
+        y: finalY,
+      });
+    }
+
     return {
       ...previousState,
       isDragging: false,
       draggingInstanceId: null,
+      activeScreen: targetScreen,
+      instances: updatedInstances,
+      x: finalX,
+      y: finalY,
+    };
+  }
+
+  if (event.type === 'MOVE_TO_SCREEN') {
+    const targetScreen = event.screenId || 'screen_1';
+    try {
+      localStorage.setItem(STORAGE_ACTIVE_SCREEN_KEY, targetScreen);
+    } catch (e) {}
+
+    const defaultX = SNAP_MARGIN_X;
+    const defaultY = SNAP_MARGIN_TOP;
+    const finalX = event.x !== undefined ? event.x : defaultX;
+    const finalY = event.y !== undefined ? event.y : defaultY;
+
+    const updatedInstances = (previousState.instances || []).map((inst) => ({
+      ...inst,
+      x: finalX,
+      y: finalY,
+    }));
+    saveInstances(updatedInstances);
+
+    if (syncChannel) {
+      syncChannel.postMessage({
+        widget: 'cava',
+        type: 'ACTIVE_SCREEN_CHANGED',
+        activeScreen: targetScreen,
+        x: finalX,
+        y: finalY,
+      });
+    }
+
+    return {
+      ...previousState,
+      activeScreen: targetScreen,
+      instances: updatedInstances,
+      x: finalX,
+      y: finalY,
+    };
+  }
+
+  if (event.type === 'SYNC_ACTIVE_SCREEN') {
+    let updatedInstances = previousState.instances;
+    if (typeof event.x === 'number' && typeof event.y === 'number') {
+      updatedInstances = (previousState.instances || []).map((inst) => ({
+        ...inst,
+        x: event.x,
+        y: event.y,
+      }));
+    }
+    return {
+      ...previousState,
+      activeScreen: event.activeScreen,
+      instances: updatedInstances,
+      x: event.x !== undefined ? event.x : previousState.x,
+      y: event.y !== undefined ? event.y : previousState.y,
     };
   }
 
@@ -542,8 +670,58 @@ if (typeof window !== 'undefined' && !window.__uebersicht_order_listener_cava) {
   });
 }
 
+if (typeof window !== 'undefined' && !window.__uebersicht_cava_sync_listener) {
+  window.__uebersicht_cava_sync_listener = true;
+
+  if (syncChannel) {
+    syncChannel.addEventListener('message', (event) => {
+      const data = event.data;
+      if (data && data.widget === 'cava' && currentDispatch) {
+        currentDispatch({
+          type: 'SYNC_ACTIVE_SCREEN',
+          activeScreen: data.activeScreen,
+          x: data.x,
+          y: data.y,
+        });
+      }
+    });
+  }
+
+  window.addEventListener('storage', (event) => {
+    if (event.key === STORAGE_ACTIVE_SCREEN_KEY && event.newValue && currentDispatch) {
+      currentDispatch({
+        type: 'SYNC_ACTIVE_SCREEN',
+        activeScreen: event.newValue,
+      });
+    }
+  });
+
+  const checkScreens = () => {
+    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/cava.widget/menu_helper';
+    const fallbackPath = './cava.widget/menu_helper';
+    run(`"${helperPath}" --screens 2>/dev/null || "${fallbackPath}" --screens 2>/dev/null`, (err, out) => {
+      if (err || !out) return;
+      try {
+        const screens = JSON.parse(out.trim());
+        if (Array.isArray(screens) && screens.length === 1 && currentDispatch) {
+          currentDispatch({ type: 'MOVE_TO_SCREEN', screenId: 'screen_0' });
+        }
+      } catch (e) {}
+    });
+  };
+
+  window.addEventListener('resize', checkScreens);
+  setTimeout(checkScreens, 1500);
+}
+
 export const render = (state, dispatch) => {
   currentDispatch = dispatch;
+  const currentScreenId = getScreenId();
+  const activeScreen = state?.activeScreen || getActiveScreen();
+
+  if (currentScreenId !== activeScreen) {
+    return <div style={{ display: 'none' }} />;
+  }
   const {
     enableSnapping = true,
     bars = [],
@@ -653,6 +831,7 @@ export const render = (state, dispatch) => {
           const payload = JSON.stringify({
             instanceId: instance.id,
             enableSnapping: enableSnapping !== false,
+            screenId: currentScreenId,
             x: Math.round(x),
             y: Math.round(y),
           });
@@ -679,6 +858,8 @@ export const render = (state, dispatch) => {
                 dispatch({ type: 'REMOVE_WIDGET', instanceId: res.instanceId || instance.id, widgetId: res.widgetId || 'cava-widget-index-jsx' });
               } else if (res.action === 'DUPLICATE_WIDGET') {
                 dispatch({ type: 'DUPLICATE_WIDGET', instanceId: res.instanceId || instance.id });
+              } else if (res.action === 'MOVE_TO_SCREEN') {
+                dispatch({ type: 'MOVE_TO_SCREEN', screenId: res.screenId, instanceId: res.instanceId || instance.id });
               } else if (res.action === 'ORDER_FRONT' || res.action === 'ORDER_FORWARD' || res.action === 'ORDER_BACKWARD' || res.action === 'ORDER_BACK') {
                 reorderWidget('cava', res.action);
                 dispatch({ type: 'ORDER_CHANGED' });
