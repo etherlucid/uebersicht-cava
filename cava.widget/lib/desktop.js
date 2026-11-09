@@ -123,25 +123,6 @@ const broadcastGlobalEvent = (payload) => {
 
 let cachedTopology = null;
 
-export const getScreenId = () => {
-  try {
-    if (typeof window !== 'undefined' && window.location && window.location.pathname) {
-      const match = window.location.pathname.match(/\/(\d+)/);
-      if (match) return `screen_${match[1]}`;
-      const parts = window.location.pathname.split('/').filter(Boolean);
-      if (parts.length > 0 && !isNaN(Number(parts[0]))) {
-        return `screen_${parts[0]}`;
-      }
-    }
-  } catch (e) {}
-  try {
-    if (typeof window !== 'undefined' && window.screen) {
-      return `screen_${window.screen.width}x${window.screen.height}`;
-    }
-  } catch (e) {}
-  return 'screen_main';
-};
-
 export const normalizeTopology = (rawScreens) => {
   if (!Array.isArray(rawScreens) || rawScreens.length === 0) return [];
   const mainScreen = rawScreens.find((s) => s.isMain) || rawScreens[0];
@@ -208,24 +189,136 @@ export const getMainScreenId = (topology = getScreensTopology()) => {
     const main = topology.find((s) => s.isMain) || topology[0];
     return main.screenId;
   }
-  return getScreenId();
+  return 'screen_2';
 };
 
 /**
- * Resolves any saved screen identifier to a currently connected screenId.
- * - If savedScreenId matches a connected screen in topology, returns it as-is.
- * - If savedScreenId is stale (e.g. from an unplugged monitor or old display ID),
- *   falls back cleanly to the main screen so widgets are never lost or duplicated.
+ * Normalizes any screen identifier (screen_2, screen_0, screen_2560x1080, 0, 1, 'main', etc.)
+ * against topology to its canonical `screen_<id>` string.
+ */
+export const normalizeScreenId = (identifier, topology = getScreensTopology()) => {
+  if (!identifier) return null;
+  if (identifier === 'all') return 'all';
+
+  const str = String(identifier).trim();
+
+  if (topology && topology.length > 0) {
+    // 1. Exact match on screenId (e.g. "screen_2")
+    const exact = topology.find((s) => s.screenId === str);
+    if (exact) return exact.screenId;
+
+    // 2. Numeric match on CGDirectDisplayID (e.g. 2 or "2" or "screen_2") or index (0, 1)
+    const numMatch = str.match(/^screen_(\d+)$/) || str.match(/^(\d+)$/);
+    if (numMatch) {
+      const val = Number(numMatch[1]);
+      // First check if it matches an id (CGDirectDisplayID)
+      const byId = topology.find((s) => s.id === val);
+      if (byId) return byId.screenId;
+      // Second check if it matches an index (0, 1)
+      const byIndex = topology.find((s) => s.index === val);
+      if (byIndex) return byIndex.screenId;
+    }
+
+    // 3. Match on resolution (e.g. "screen_2560x1080" or "2560x1080")
+    const resMatch = str.match(/(\d+)x(\d+)/);
+    if (resMatch) {
+      const rw = Number(resMatch[1]);
+      const rh = Number(resMatch[2]);
+      const byRes = topology.find((s) => (s.w === rw && s.h === rh) || (s.w === rh && s.h === rw));
+      if (byRes) return byRes.screenId;
+    }
+
+    // 4. Match on keywords
+    if (str === 'main' || str === 'screen_main' || str.toLowerCase().includes('main')) {
+      const main = topology.find((s) => s.isMain) || topology[0];
+      return main.screenId;
+    }
+    if (str === 'secondary' || str === 'screen_secondary' || str.toLowerCase().includes('second')) {
+      const sec = topology.find((s) => !s.isMain) || topology[1] || topology[0];
+      return sec.screenId;
+    }
+
+    // 5. Match by display name (e.g. "LG", "ASUS")
+    const byName = topology.find((s) => s.name && s.name.toLowerCase().includes(str.toLowerCase()));
+    if (byName) return byName.screenId;
+
+    // Fallback: main screen
+    const main = topology.find((s) => s.isMain) || topology[0];
+    return main.screenId;
+  }
+
+  // Pre-topology hardcoded heuristics matching LG (2560x1080) and ASUS (1080x1920)
+  if (str === 'screen_2' || str === 'screen_0' || str === 'main' || str.includes('2560')) {
+    return 'screen_2';
+  }
+  if (str === 'screen_3' || str === 'screen_1' || str === 'secondary' || str.includes('1080')) {
+    return 'screen_3';
+  }
+  return str;
+};
+
+/**
+ * Determines which display the current WebView is running on.
+ * Uses window.location.pathname (/0/ or /1/), viewport dimensions, and window.screen.
+ * Guaranteed to return the canonical `screen_<id>` matching topology.
+ */
+export const getScreenId = () => {
+  let matchedIndex = null;
+  try {
+    if (typeof window !== 'undefined' && window.location && window.location.pathname) {
+      const match = window.location.pathname.match(/\/(\d+)/);
+      if (match) {
+        matchedIndex = parseInt(match[1], 10);
+      } else {
+        const parts = window.location.pathname.split('/').filter(Boolean);
+        if (parts.length > 0 && !isNaN(Number(parts[0]))) {
+          matchedIndex = parseInt(parts[0], 10);
+        }
+      }
+    }
+  } catch (e) {}
+
+  const winW = (typeof window !== 'undefined') ? (window.innerWidth || (window.screen && window.screen.width)) : null;
+  const winH = (typeof window !== 'undefined') ? (window.innerHeight || (window.screen && window.screen.height)) : null;
+
+  const topology = getScreensTopology();
+
+  if (topology && topology.length > 0) {
+    // 1. Match by URL pathname screen index
+    if (matchedIndex !== null) {
+      const byIndex = topology.find((s) => s.index === matchedIndex);
+      if (byIndex) return byIndex.screenId;
+    }
+    // 2. Match by exact resolution
+    if (winW && winH) {
+      const byRes = topology.find((s) => (s.w === winW && s.h === winH) || (s.w === winH && s.h === winW));
+      if (byRes) return byRes.screenId;
+    }
+    // 3. Match by single dimension
+    if (winW) {
+      const byW = topology.find((s) => s.w === winW || s.h === winW);
+      if (byW) return byW.screenId;
+    }
+    // Default to main display
+    const main = topology.find((s) => s.isMain) || topology[0];
+    return main.screenId;
+  }
+
+  // Pre-topology hardcoded heuristics matching user's LG (2560x1080) and ASUS (1080x1920)
+  if (winW === 2560 || matchedIndex === 0) return 'screen_2';
+  if (winW === 1080 || winH === 1920 || matchedIndex === 1) return 'screen_3';
+  if (matchedIndex !== null) return `screen_${matchedIndex}`;
+  if (winW && winH) return `screen_${winW}x${winH}`;
+  return 'screen_2';
+};
+
+/**
+ * Resolves any saved screen identifier to a currently connected canonical screenId.
  */
 export const resolveActiveScreen = (savedScreenId, topology = getScreensTopology()) => {
   if (savedScreenId === 'all') return 'all';
-  if (topology && topology.length > 0) {
-    if (savedScreenId && topology.some((s) => s.screenId === savedScreenId)) {
-      return savedScreenId;
-    }
-    return getMainScreenId(topology);
-  }
-  return savedScreenId || getScreenId();
+  if (!savedScreenId) return getMainScreenId(topology);
+  return normalizeScreenId(savedScreenId, topology);
 };
 
 /**
@@ -236,15 +329,24 @@ export const isScreenActive = (currentScreenId, targetScreenId) => {
   if (targetScreenId === 'all') return true;
 
   const topology = getScreensTopology();
-  if (topology.length > 0) {
-    const resolvedTarget = resolveActiveScreen(targetScreenId, topology);
-    return currentScreenId === resolvedTarget;
-  }
+  const current = normalizeScreenId(currentScreenId || getScreenId(), topology);
+  const target = normalizeScreenId(targetScreenId, topology);
 
-  // Fallback before topology is first populated
-  if (targetScreenId && currentScreenId === targetScreenId) {
+  if (current && target && current === target) {
     return true;
   }
+
+  // FAILSAFE 1: If targetScreenId is not set or resolves to null, always show on main display!
+  if (!target || target === 'screen_main') {
+    const main = getMainScreenId(topology);
+    if (current === main) return true;
+  }
+
+  // FAILSAFE 2: If only 1 monitor is connected, always show!
+  if (topology && topology.length <= 1) {
+    return true;
+  }
+
   return false;
 };
 
@@ -302,27 +404,37 @@ export const calculateSnappedPosition = (
  * Given a card being dragged on `currentScreenId` at local `(curX, curY)`,
  * checks if the card overlaps another display in `topology` and returns its
  * local coordinates on that other display for real-time cross-bezel rendering.
+ * Supports both object argument and positional argument signatures.
  */
-export const computeCrossScreenPreview = ({
-  currentScreenId,
-  curX,
-  curY,
-  cardW,
-  cardH,
-}) => {
+export const computeCrossScreenPreview = (arg1, curX, curY, cardW, cardH) => {
+  let currentScreenId = arg1;
+  let x = curX;
+  let y = curY;
+  let w = cardW;
+  let h = cardH;
+
+  if (typeof arg1 === 'object' && arg1 !== null) {
+    currentScreenId = arg1.currentScreenId;
+    x = arg1.curX;
+    y = arg1.curY;
+    w = arg1.cardW;
+    h = arg1.cardH;
+  }
+
   const topology = getScreensTopology();
   if (!topology || topology.length <= 1) return null;
 
-  const source = topology.find((s) => s.screenId === currentScreenId);
+  const sourceScreenId = normalizeScreenId(currentScreenId, topology);
+  const source = topology.find((s) => s.screenId === sourceScreenId);
   if (!source) return null;
 
-  const globalLeft = source.topLeftX + curX;
-  const globalTop = source.topLeftY + curY;
-  const globalRight = globalLeft + cardW;
-  const globalBottom = globalTop + cardH;
+  const globalLeft = source.topLeftX + x;
+  const globalTop = source.topLeftY + y;
+  const globalRight = globalLeft + w;
+  const globalBottom = globalTop + h;
 
   for (const s of topology) {
-    if (s.screenId === currentScreenId) continue;
+    if (s.screenId === sourceScreenId) continue;
     const sLeft = s.topLeftX;
     const sTop = s.topLeftY;
     const sRight = sLeft + s.w;
@@ -335,8 +447,8 @@ export const computeCrossScreenPreview = ({
         targetScreen: s.screenId,
         x: Math.round(globalLeft - sLeft),
         y: Math.round(globalTop - sTop),
-        w: cardW,
-        h: cardH,
+        w,
+        h,
       };
     }
   }
@@ -349,18 +461,38 @@ export const computeCrossScreenPreview = ({
  * Uses real display arrangement geometry so dragging across any monitor border
  * (left, right, top, bottom, or offset vertical monitor) lands at the exact
  * physical position where the user released the card.
+ * Supports both object argument and positional argument signatures.
  */
-export const resolveDragEndAcrossScreens = ({
-  currentScreenId,
-  curX,
-  curY,
-  cardW,
-  cardH,
-  clientX,
-  clientY,
-  bypassSnap = false,
-  margins = {},
-}) => {
+export const resolveDragEndAcrossScreens = (arg1, ...rest) => {
+  let opts = {};
+  if (typeof arg1 === 'object' && arg1 !== null) {
+    opts = arg1;
+  } else {
+    opts = {
+      currentScreenId: arg1,
+      curX: rest[0],
+      curY: rest[1],
+      cardW: rest[2],
+      cardH: rest[3],
+      clientX: rest[4],
+      clientY: rest[5],
+      bypassSnap: rest[6],
+      margins: rest[7],
+    };
+  }
+
+  const {
+    currentScreenId: rawScreenId,
+    curX,
+    curY,
+    cardW,
+    cardH,
+    clientX,
+    clientY,
+    bypassSnap = false,
+    margins = {},
+  } = opts;
+
   const winW = (typeof window !== 'undefined' && window.innerWidth) ? window.innerWidth : 1920;
   const winH = (typeof window !== 'undefined' && window.innerHeight) ? window.innerHeight : 1080;
 
@@ -369,6 +501,7 @@ export const resolveDragEndAcrossScreens = ({
   const marginBottom = margins.marginBottom ?? SNAP_MARGIN_BOTTOM;
 
   const topology = getScreensTopology();
+  const currentScreenId = normalizeScreenId(rawScreenId, topology);
   const source = topology.find((s) => s.screenId === currentScreenId);
 
   if (source && topology.length > 1) {
@@ -401,7 +534,7 @@ export const resolveDragEndAcrossScreens = ({
       );
     }
 
-    // 2. Horizontal fallback if dragged off left/right edge at a Y outside shorter screen's vertical span
+    // 2. Horizontal fallback if dragged off left/right edge
     if (!dest && (centerGlobalX < source.topLeftX || centerGlobalX > source.topLeftX + source.w)) {
       dest = topology.find(
         (s) =>
@@ -447,18 +580,28 @@ export const resolveDragEndAcrossScreens = ({
 // 5. Lifecycle & Listener Registration
 // ---------------------------------------------------------------------------
 
-export const initWidgetDesktopSync = ({
-  widgetName,
-  helperCommand,
-  run,
-  getDispatch,
-  onSyncPacket,
-  onScreensUpdated,
-}) => {
+export const initWidgetDesktopSync = (opts = {}) => {
   if (typeof window === 'undefined') return;
+
+  const widgetName = opts.widgetName || opts.widgetId || 'widget';
   const guardKey = `__uebersicht_desktop_sync_${widgetName}`;
   if (window[guardKey]) return;
   window[guardKey] = true;
+
+  const run = opts.run || (typeof window !== 'undefined' ? window.run : null);
+  let helperCommand = opts.helperCommand;
+  if (!helperCommand && opts.helperPaths && Array.isArray(opts.helperPaths)) {
+    helperCommand = opts.helperPaths.map((p) => `"${p}" --screens 2>/dev/null`).join(' || ');
+  }
+  if (!helperCommand) {
+    helperCommand = `"$HOME/Library/Application Support/Übersicht/widgets/${widgetName}.widget/menu_helper" --screens 2>/dev/null || "./${widgetName}.widget/menu_helper" --screens 2>/dev/null`;
+  }
+
+  const getDispatch = opts.getDispatch;
+  const onSyncPacket = opts.onSyncPacket;
+  const onScreensUpdated = opts.onScreensUpdated;
+  const storageKeys = opts.storageKeys || [];
+  const onStorageEvent = opts.onStorageEvent;
 
   let lastProcessedTs = 0;
 
@@ -508,6 +651,11 @@ export const initWidgetDesktopSync = ({
           }
         }
       } catch (e) {}
+    } else if (storageKeys.includes(event.key) && onStorageEvent) {
+      const dispatch = getDispatch ? getDispatch() : null;
+      if (dispatch) {
+        onStorageEvent(event, dispatch);
+      }
     }
   });
 
@@ -520,19 +668,21 @@ export const initWidgetDesktopSync = ({
 
   const refreshScreensTopology = () => {
     if (!run || !helperCommand) return;
-    run(helperCommand, (err, out) => {
-      if (err || !out) return;
-      try {
-        const rawScreens = JSON.parse(out.trim());
-        const normalized = updateScreensTopology(rawScreens);
-        const dispatch = getDispatch ? getDispatch() : null;
-        if (onScreensUpdated && dispatch) {
-          onScreensUpdated(normalized, dispatch);
-        } else if (dispatch) {
-          dispatch({ type: 'TOPOLOGY_UPDATED', topology: normalized });
-        }
-      } catch (e) {}
-    });
+    try {
+      run(helperCommand, (err, out) => {
+        if (err || !out) return;
+        try {
+          const rawScreens = JSON.parse(out.trim());
+          const normalized = updateScreensTopology(rawScreens);
+          const dispatch = getDispatch ? getDispatch() : null;
+          if (onScreensUpdated && dispatch) {
+            onScreensUpdated(normalized, dispatch);
+          } else if (dispatch) {
+            dispatch({ type: 'TOPOLOGY_UPDATED', topology: normalized });
+          }
+        } catch (e) {}
+      });
+    } catch (e) {}
   };
 
   refreshScreensTopology();
