@@ -11,6 +11,59 @@ export const WIDGET_ORDER_KEY = 'uebersicht_widget_order';
 export const DEFAULT_WIDGET_ORDER = ['sticker', 'cava', 'shell', 'nowplaying'];
 export const TOPOLOGY_STORAGE_KEY = 'uebersicht_screens_topology_v2';
 
+export const WIDGET_MENU_PORTS = {
+  nowplaying: 41421,
+  cava: 41422,
+  shell: 41423,
+  sticker: 41424,
+};
+
+export const openWidgetContextMenu = (widgetName, payloadObj, fallbackCmd, runFn, onAction) => {
+  const port = WIDGET_MENU_PORTS[widgetName];
+  const body = typeof payloadObj === 'string' ? payloadObj : JSON.stringify(payloadObj);
+
+  const handleOutput = (rawOut) => {
+    if (!rawOut || !onAction) return;
+    const trimmed = String(rawOut).trim();
+    if (!trimmed) return;
+    try {
+      const res = JSON.parse(trimmed);
+      if (res && res.action) {
+        onAction(res);
+      }
+    } catch (e) {}
+  };
+
+  if (port && typeof fetch !== 'undefined') {
+    fetch(`http://127.0.0.1:${port}/menu`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    })
+      .then((resp) => {
+        if (!resp.ok) throw new Error('Menu daemon HTTP error');
+        return resp.text();
+      })
+      .then((text) => {
+        handleOutput(text);
+      })
+      .catch(() => {
+        if (runFn && fallbackCmd) {
+          runFn(fallbackCmd, (err, out) => {
+            if (!err && out) handleOutput(out);
+          });
+        }
+      });
+    return;
+  }
+
+  if (runFn && fallbackCmd) {
+    runFn(fallbackCmd, (err, out) => {
+      if (!err && out) handleOutput(out);
+    });
+  }
+};
+
 // ---------------------------------------------------------------------------
 // 1. Z-Index / Layer Ordering
 // ---------------------------------------------------------------------------
@@ -708,21 +761,43 @@ export const initWidgetDesktopSync = (opts = {}) => {
     }
   });
 
+  const applyScreensOutput = (out) => {
+    if (!out) return;
+    try {
+      const rawScreens = JSON.parse(out.trim());
+      const normalized = updateScreensTopology(rawScreens);
+      const dispatch = getDispatch ? getDispatch() : null;
+      if (onScreensUpdated && dispatch) {
+        onScreensUpdated(normalized, dispatch);
+      } else if (dispatch) {
+        dispatch({ type: 'TOPOLOGY_UPDATED', topology: normalized });
+      }
+    } catch (e) {}
+  };
+
   const refreshScreensTopology = () => {
+    const port = WIDGET_MENU_PORTS[widgetName];
+    if (port && typeof fetch !== 'undefined') {
+      fetch(`http://127.0.0.1:${port}/screens`, { method: 'GET' })
+        .then((resp) => {
+          if (!resp.ok) throw new Error('Daemon not ready');
+          return resp.text();
+        })
+        .then((out) => applyScreensOutput(out))
+        .catch(() => {
+          if (!run || !helperCommand) return;
+          try {
+            run(helperCommand, (err, out) => {
+              if (!err && out) applyScreensOutput(out);
+            });
+          } catch (e) {}
+        });
+      return;
+    }
     if (!run || !helperCommand) return;
     try {
       run(helperCommand, (err, out) => {
-        if (err || !out) return;
-        try {
-          const rawScreens = JSON.parse(out.trim());
-          const normalized = updateScreensTopology(rawScreens);
-          const dispatch = getDispatch ? getDispatch() : null;
-          if (onScreensUpdated && dispatch) {
-            onScreensUpdated(normalized, dispatch);
-          } else if (dispatch) {
-            dispatch({ type: 'TOPOLOGY_UPDATED', topology: normalized });
-          }
-        } catch (e) {}
+        if (!err && out) applyScreensOutput(out);
       });
     } catch (e) {}
   };
