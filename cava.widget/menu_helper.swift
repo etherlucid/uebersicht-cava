@@ -158,8 +158,39 @@ removeItem.representedObject = "{\"action\":\"REMOVE_WIDGET\",\"instanceId\":\"\
 menu.addItem(removeItem)
 
 // Pop up native menu above all windows at cursor location
+let menuPidFile = "/tmp/uebersicht_active_menu.pid"
+let menuDismissFile = "/tmp/uebersicht_menu_dismissed.ts"
+let nowTs = Date().timeIntervalSince1970
+
+if let pidStr = try? String(contentsOfFile: menuPidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+   let oldPid = Int32(pidStr), oldPid > 0, oldPid != getpid() {
+    if kill(oldPid, 0) == 0 {
+        kill(oldPid, SIGTERM)
+        try? FileManager.default.removeItem(atPath: menuPidFile)
+        try? String(format: "%.4f", nowTs).write(toFile: menuDismissFile, atomically: true, encoding: .utf8)
+        exit(0)
+    }
+}
+
+if let tsStr = try? String(contentsOfFile: menuDismissFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+   let lastDismiss = Double(tsStr) {
+    try? FileManager.default.removeItem(atPath: menuDismissFile)
+    if (nowTs - lastDismiss) >= 0 && (nowTs - lastDismiss) < 0.25 {
+        exit(0)
+    }
+}
+
+try? "\(getpid())".write(toFile: menuPidFile, atomically: true, encoding: .utf8)
+NSApp.activate(ignoringOtherApps: true)
 let mouseLoc = NSEvent.mouseLocation
-menu.popUp(positioning: nil, at: mouseLoc, in: nil)
+let selected = menu.popUp(positioning: nil, at: mouseLoc, in: nil)
+try? FileManager.default.removeItem(atPath: menuPidFile)
+if !selected && delegate.outputAction == nil {
+    let endTs = Date().timeIntervalSince1970
+    try? String(format: "%.4f", endTs).write(toFile: menuDismissFile, atomically: true, encoding: .utf8)
+} else {
+    try? FileManager.default.removeItem(atPath: menuDismissFile)
+}
 
 if let action = delegate.outputAction {
     print(action)

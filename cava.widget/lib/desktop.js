@@ -407,19 +407,29 @@ export const calculateSnappedPosition = (
  * local coordinates on that other display for real-time cross-bezel rendering.
  * Supports both object argument and positional argument signatures.
  */
-export const computeCrossScreenPreview = (arg1, curX, curY, cardW, cardH) => {
+export const computeCrossScreenPreview = (arg1, curX, curY, cardW, cardH, extra = {}) => {
   let currentScreenId = arg1;
   let x = curX;
   let y = curY;
   let w = cardW;
   let h = cardH;
+  let meta = extra || {};
 
   if (typeof arg1 === 'object' && arg1 !== null) {
-    currentScreenId = arg1.currentScreenId;
-    x = arg1.curX;
-    y = arg1.curY;
-    w = arg1.cardW;
-    h = arg1.cardH;
+    const {
+      currentScreenId: cid,
+      curX: cx,
+      curY: cy,
+      cardW: cw,
+      cardH: ch,
+      ...rest
+    } = arg1;
+    currentScreenId = cid;
+    x = cx;
+    y = cy;
+    w = cw;
+    h = ch;
+    meta = rest;
   }
 
   const topology = getScreensTopology();
@@ -443,11 +453,21 @@ export const computeCrossScreenPreview = (arg1, curX, curY, cardW, cardH) => {
 
     const overlapsX = globalRight > sLeft && globalLeft < sRight;
     const overlapsY = globalBottom > sTop && globalTop < sBottom;
-    if (overlapsX && overlapsY) {
+    const crossedHorizontally =
+      overlapsX &&
+      (globalLeft < source.topLeftX || globalRight > source.topLeftX + source.w);
+
+    if (overlapsX && (overlapsY || crossedHorizontally)) {
+      const rawLocalX = Math.round(globalLeft - sLeft);
+      const rawLocalY = Math.round(globalTop - sTop);
+      const clampedY = overlapsY
+        ? rawLocalY
+        : Math.max(0, Math.min(Math.max(0, s.h - h), rawLocalY));
       return {
+        ...meta,
         targetScreen: s.screenId,
-        x: Math.round(globalLeft - sLeft),
-        y: Math.round(globalTop - sTop),
+        x: rawLocalX,
+        y: clampedY,
         w,
         h,
       };
@@ -552,8 +572,29 @@ export const resolveDragEndAcrossScreens = (arg1, ...rest) => {
       const maxDestX = Math.max(0, dest.w - cardW);
       const maxDestY = Math.max(0, dest.h - cardH);
 
-      let finalX = Math.max(marginX, Math.min(Math.max(marginX, maxDestX - marginX), Math.round(rawDestX)));
-      let finalY = Math.max(marginTop, Math.min(Math.max(marginTop, maxDestY - marginBottom), Math.round(rawDestY)));
+      let finalX = Math.max(0, Math.min(maxDestX, Math.round(rawDestX)));
+      let finalY = Math.max(0, Math.min(maxDestY, Math.round(rawDestY)));
+
+      if (!bypassSnap) {
+        const snapTop = marginTop;
+        const snapBottom = Math.max(0, dest.h - cardH - marginBottom);
+        const snapLeft = marginX;
+        const snapRight = Math.max(0, dest.w - cardW - marginX);
+        const threshold = margins.threshold ?? SNAP_THRESHOLD;
+        const tolerance = margins.tolerance ?? SNAP_EDGE_TOLERANCE;
+
+        if (finalX >= snapLeft - tolerance && finalX <= snapLeft + threshold) {
+          finalX = snapLeft;
+        } else if (finalX >= snapRight - threshold && finalX <= snapRight + tolerance) {
+          finalX = snapRight;
+        }
+
+        if (finalY >= snapTop - tolerance && finalY <= snapTop + threshold) {
+          finalY = snapTop;
+        } else if (finalY >= snapBottom - threshold && finalY <= snapBottom + tolerance) {
+          finalY = snapBottom;
+        }
+      }
 
       return {
         targetScreen: dest.screenId,
