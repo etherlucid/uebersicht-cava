@@ -203,11 +203,11 @@ export const normalizeScreenId = (identifier, topology = getScreensTopology()) =
   const str = String(identifier).trim();
 
   if (topology && topology.length > 0) {
-    // 1. Exact match on screenId (e.g. "screen_2")
+    // 1. Exact match on screenId (e.g. "screen_2", "screen_3")
     const exact = topology.find((s) => s.screenId === str);
     if (exact) return exact.screenId;
 
-    // 2. Numeric match on CGDirectDisplayID (e.g. 2 or "2" or "screen_2") or index (0, 1)
+    // 2. Match on numeric CGDirectDisplayID (e.g. 2 or 3 or "screen_2") or index (0, 1)
     const numMatch = str.match(/^screen_(\d+)$/) || str.match(/^(\d+)$/);
     if (numMatch) {
       const val = Number(numMatch[1]);
@@ -219,7 +219,7 @@ export const normalizeScreenId = (identifier, topology = getScreensTopology()) =
       if (byIndex) return byIndex.screenId;
     }
 
-    // 3. Match on resolution (e.g. "screen_2560x1080" or "2560x1080")
+    // 3. Match on resolution (e.g. "screen_2560x1080" or "screen_1080x1920")
     const resMatch = str.match(/(\d+)x(\d+)/);
     if (resMatch) {
       const rw = Number(resMatch[1]);
@@ -247,11 +247,11 @@ export const normalizeScreenId = (identifier, topology = getScreensTopology()) =
     return main.screenId;
   }
 
-  // Pre-topology hardcoded heuristics matching LG (2560x1080) and ASUS (1080x1920)
-  if (str === 'screen_2' || str === 'screen_0' || str === 'main' || str.includes('2560')) {
+  // Pre-topology hardcoded heuristics matching user's LG (2560x1080) and ASUS (1080x1920)
+  if (str === 'screen_2' || str === 'screen_0' || str === 'main' || str.includes('2560') || str.toLowerCase().includes('lg')) {
     return 'screen_2';
   }
-  if (str === 'screen_3' || str === 'screen_1' || str === 'secondary' || str.includes('1080')) {
+  if (str === 'screen_3' || str === 'screen_1' || str === 'secondary' || str.includes('1080') || str.toLowerCase().includes('asus')) {
     return 'screen_3';
   }
   return str;
@@ -259,20 +259,21 @@ export const normalizeScreenId = (identifier, topology = getScreensTopology()) =
 
 /**
  * Determines which display the current WebView is running on.
- * Uses window.location.pathname (/0/ or /1/), viewport dimensions, and window.screen.
+ * In Übersicht, the WebView URL pathname is `/<screenId>` where screenId is
+ * the CGDirectDisplayID (e.g. /2 for LG, /3 for ASUS).
  * Guaranteed to return the canonical `screen_<id>` matching topology.
  */
 export const getScreenId = () => {
-  let matchedIndex = null;
+  let matchedNum = null;
   try {
     if (typeof window !== 'undefined' && window.location && window.location.pathname) {
       const match = window.location.pathname.match(/\/(\d+)/);
       if (match) {
-        matchedIndex = parseInt(match[1], 10);
+        matchedNum = parseInt(match[1], 10);
       } else {
         const parts = window.location.pathname.split('/').filter(Boolean);
         if (parts.length > 0 && !isNaN(Number(parts[0]))) {
-          matchedIndex = parseInt(parts[0], 10);
+          matchedNum = parseInt(parts[0], 10);
         }
       }
     }
@@ -284,31 +285,31 @@ export const getScreenId = () => {
   const topology = getScreensTopology();
 
   if (topology && topology.length > 0) {
-    // 1. Match by URL pathname screen index
-    if (matchedIndex !== null) {
-      const byIndex = topology.find((s) => s.index === matchedIndex);
+    // 1. PRIMARY MATCH: CGDirectDisplayID from Übersicht URL (/2 -> screen_2, /3 -> screen_3)
+    if (matchedNum !== null) {
+      const byId = topology.find((s) => s.id === matchedNum);
+      if (byId) return byId.screenId;
+      const byIndex = topology.find((s) => s.index === matchedNum);
       if (byIndex) return byIndex.screenId;
     }
-    // 2. Match by exact resolution
+
+    // 2. SECONDARY MATCH: Exact screen viewport dimensions
     if (winW && winH) {
-      const byRes = topology.find((s) => (s.w === winW && s.h === winH) || (s.w === winH && s.h === winW));
+      const byRes = topology.find((s) => s.w === winW && s.h === winH);
       if (byRes) return byRes.screenId;
+      const byRotated = topology.find((s) => s.w === winH && s.h === winW);
+      if (byRotated) return byRotated.screenId;
     }
-    // 3. Match by single dimension
-    if (winW) {
-      const byW = topology.find((s) => s.w === winW || s.h === winW);
-      if (byW) return byW.screenId;
-    }
-    // Default to main display
+
+    // Fallback: main display
     const main = topology.find((s) => s.isMain) || topology[0];
     return main.screenId;
   }
 
-  // Pre-topology hardcoded heuristics matching user's LG (2560x1080) and ASUS (1080x1920)
-  if (winW === 2560 || matchedIndex === 0) return 'screen_2';
-  if (winW === 1080 || winH === 1920 || matchedIndex === 1) return 'screen_3';
-  if (matchedIndex !== null) return `screen_${matchedIndex}`;
-  if (winW && winH) return `screen_${winW}x${winH}`;
+  // Pre-topology fallback matching user's LG (2560x1080) and ASUS (1080x1920)
+  if (matchedNum === 2 || winW === 2560) return 'screen_2';
+  if (matchedNum === 3 || winW === 1080 || winH === 1920) return 'screen_3';
+  if (matchedNum !== null) return `screen_${matchedNum}`;
   return 'screen_2';
 };
 
