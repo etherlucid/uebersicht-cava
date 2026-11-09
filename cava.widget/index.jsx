@@ -13,7 +13,10 @@ import {
   initWidgetDesktopSync,
 } from './lib/desktop.js';
 
-export const refreshFrequency = 40; // Poll bridge every 40ms (~25 FPS)
+// Watchdog poll only every 2000ms to keep cava_bridge.py alive.
+// Real-time 60fps bar frames stream directly via EventSource (127.0.0.1:41418/stream)
+// and render onto a HiDPI <canvas> without React virtual-DOM re-renders.
+export const refreshFrequency = 2000;
 
 export const command = `"$HOME/Library/Application Support/Übersicht/widgets/cava.widget/cava_poll" "$HOME/Library/Application Support/Übersicht/widgets/cava.widget/cava_bridge.py" 2>/dev/null || ./cava.widget/cava_poll 2>/dev/null || python3 "$HOME/Library/Application Support/Übersicht/widgets/cava.widget/cava_bridge.py" 2>/dev/null`;
 
@@ -29,6 +32,8 @@ const SNAP_MARGIN_X = settings.snapMarginX !== undefined ? settings.snapMarginX 
 const SNAP_MARGIN_TOP = settings.snapMarginTop !== undefined ? settings.snapMarginTop : 14;
 const SNAP_MARGIN_BOTTOM = settings.snapMarginBottom !== undefined ? settings.snapMarginBottom : 14;
 const DEFAULT_BARS_COUNT = settings.barsCount || 28;
+const STREAM_URL = 'http://127.0.0.1:41418/stream';
+const BARS_URL = 'http://127.0.0.1:41418/bars';
 
 const SNAP_MARGINS = {
   marginX: SNAP_MARGIN_X,
@@ -104,26 +109,274 @@ function interpolateBands(stops, totalBands) {
   return bands;
 }
 
-function getGradientCss(colors, mode, bandCount = 24) {
-  if (!colors || colors.length === 0) return '#59cc33';
+// ============================================================================
+// High-Frame-Rate (60fps) Direct Canvas Visualizer Engine
+// ============================================================================
+let numBars = DEFAULT_BARS_COUNT;
+let targetBars = new Float32Array(numBars);
+let currentBars = new Float32Array(numBars);
+const canvasRegistry = new Map(); // instanceId -> { canvas, ctx, w, h, dpr, grad }
+let rafId = null;
+let lastFrameTs = 0;
+let sseSource = null;
+let sseConnected = false;
+let sseRetryTimer = null;
+let fallbackPollTimer = null;
+
+function buildCanvasGradient(ctx, cssHeight) {
+  const colors = theme.gradient && theme.gradient.length > 0 ? theme.gradient : ['#59cc33'];
   if (colors.length === 1) return colors[0];
 
-  if (mode === 'banded') {
+  const grad = ctx.createLinearGradient(0, cssHeight, 0, 0);
+  const bandCount = settings.bandCount || 24;
+
+  if (settings.gradientMode === 'banded') {
     const bands = interpolateBands(colors, bandCount);
     const n = bands.length;
-    const step = 100 / n;
-    const stops = [];
     for (let i = 0; i < n; i++) {
-      const start = (i * step).toFixed(2);
-      const end = ((i + 1) * step).toFixed(2);
-      stops.push(`${bands[i]} ${start}%`, `${bands[i]} ${end}%`);
+      const start = i / n;
+      const end = (i + 1) / n;
+      grad.addColorStop(Math.min(1, Math.max(0, start + (i > 0 ? 0.0001 : 0))), bands[i]);
+      grad.addColorStop(Math.min(1, Math.max(0, end - (i < n - 1 ? 0.0001 : 0))), bands[i]);
     }
-    return `linear-gradient(to top, ${stops.join(', ')})`;
+  } else {
+    const n = colors.length;
+    for (let i = 0; i < n; i++) {
+      grad.addColorStop(i / (n - 1), colors[i]);
+    }
   }
-
-  return `linear-gradient(to top, ${colors.join(', ')})`;
+  return grad;
 }
 
+function drawRoundedTopRect(ctx, x, y, w, h, r) {
+  const radius = Math.min(r, w / 2, h / 2);
+  if (radius <= 0) {
+    ctx.fillRect(x, y, w, h);
+    return;
+  }
+  ctx.beginPath();
+  ctx.moveTo(x, y + h);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+  ctx.lineTo(x + w, y + h);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawCanvasEntry(entry) {
+  const { canvas } = entry;
+  if (!canvas || !canvas.isConnected) return false;
+
+  const rect = canvas.getBoundingClientRect();
+  const cssW = Math.round(rect.width);
+  const cssH = Math.round(rect.height);
+  if (cssW <= 0 || cssH <= 0) return true;
+
+  const dpr = window.devicePixelRatio || 1;
+  if (entry.w !== cssW || entry.h !== cssH || entry.dpr !== dpr || !entry.ctx) {
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    entry.ctx = canvas.getContext('2d');
+    entry.w = cssW;
+    entry.h = cssH;
+    entry.dpr = dpr;
+    entry.grad = buildCanvasGradient(entry.ctx, cssH);
+  }
+
+  const ctx = entry.ctx;
+  ctx.save();
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const n = numBars;
+  const gapPx = settings.barGap !== undefined ? settings.barGap : 3;
+  const radiusPx = settings.barCornerRadius || 0;
+  const minHeightPct = typeof settings.minBarHeightPct === 'number' ? settings.minBarHeightPct : 2;
+
+  const totalGap = gapPx * (n - 1);
+  const barW = Math.max(2, (cssW - totalGap) / n);
+
+  ctx.fillStyle = entry.grad;
+  if (settings.enableGlow) {
+    ctx.shadowColor = (theme.gradient && theme.gradient[0]) || '#59cc33';
+    ctx.shadowBlur = 6;
+  }
+
+  for (let i = 0; i < n; i++) {
+    const val = currentBars[i] || 0;
+    const pct = Math.max(minHeightPct, Math.min(100, val));
+    const barH = Math.max(1, (pct / 100) * cssH);
+    const bx = i * (barW + gapPx);
+    const by = cssH - barH;
+    if (radiusPx > 0) {
+      drawRoundedTopRect(ctx, bx, by, barW, barH, radiusPx);
+    } else {
+      ctx.fillRect(bx, by, barW, barH);
+    }
+  }
+
+  ctx.restore();
+  return true;
+}
+
+function renderTick(now) {
+  rafId = null;
+  if (canvasRegistry.size === 0) return;
+
+  const dt = lastFrameTs ? Math.min(0.05, Math.max(0.004, (now - lastFrameTs) / 1000)) : 0.016;
+  lastFrameTs = now;
+
+  // Fast attack for crisp transients, smooth exponential release for fluid 60fps motion
+  const attackAlpha = 1 - Math.exp(-36 * dt);
+  const releaseAlpha = 1 - Math.exp(-20 * dt);
+  const minHeightPct = typeof settings.minBarHeightPct === 'number' ? settings.minBarHeightPct : 2;
+
+  let stillMoving = false;
+  for (let i = 0; i < numBars; i++) {
+    const target = targetBars[i];
+    const cur = currentBars[i];
+    const diff = target - cur;
+    if (Math.abs(diff) > 0.08) {
+      const alpha = diff > 0 ? attackAlpha : releaseAlpha;
+      currentBars[i] = cur + diff * alpha;
+      stillMoving = true;
+    } else {
+      currentBars[i] = target;
+    }
+    if (target > minHeightPct) {
+      stillMoving = true;
+    }
+  }
+
+  for (const [id, entry] of canvasRegistry.entries()) {
+    if (!drawCanvasEntry(entry)) {
+      canvasRegistry.delete(id);
+    }
+  }
+
+  if (stillMoving && canvasRegistry.size > 0) {
+    rafId = window.requestAnimationFrame(renderTick);
+  } else {
+    lastFrameTs = 0;
+  }
+}
+
+function scheduleRenderLoop() {
+  if (!rafId && canvasRegistry.size > 0 && typeof window !== 'undefined') {
+    rafId = window.requestAnimationFrame(renderTick);
+  }
+}
+
+function ingestBarsLine(line) {
+  if (!line || typeof line !== 'string') return;
+  const parts = line.trim().split(';');
+  let count = 0;
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i] !== '') count++;
+  }
+  if (count <= 0) return;
+
+  if (count !== numBars) {
+    numBars = count;
+    const nextTarget = new Float32Array(numBars);
+    const nextCurrent = new Float32Array(numBars);
+    nextCurrent.set(currentBars.subarray(0, Math.min(currentBars.length, numBars)));
+    targetBars = nextTarget;
+    currentBars = nextCurrent;
+  }
+
+  let idx = 0;
+  for (let i = 0; i < parts.length && idx < numBars; i++) {
+    const p = parts[i];
+    if (p === '') continue;
+    const n = parseInt(p, 10);
+    targetBars[idx++] = isNaN(n) ? 0 : Math.max(0, Math.min(100, n));
+  }
+
+  scheduleRenderLoop();
+}
+
+function startFallbackPolling() {
+  if (fallbackPollTimer) return;
+  fallbackPollTimer = setInterval(() => {
+    if (sseConnected || canvasRegistry.size === 0) return;
+    fetch(BARS_URL, { cache: 'no-store' })
+      .then((r) => (r.ok ? r.text() : ''))
+      .then((txt) => {
+        if (txt) {
+          ingestBarsLine(txt);
+          ensureStreamConnected();
+        }
+      })
+      .catch(() => {});
+  }, 80);
+}
+
+function ensureStreamConnected() {
+  if (typeof window === 'undefined' || typeof EventSource === 'undefined') return;
+  if (sseSource && sseSource.readyState !== EventSource.CLOSED) return;
+
+  try {
+    sseSource = new EventSource(STREAM_URL);
+    sseSource.onopen = () => {
+      sseConnected = true;
+    };
+    sseSource.onmessage = (e) => {
+      sseConnected = true;
+      if (e && e.data) {
+        ingestBarsLine(e.data);
+      }
+    };
+    sseSource.onerror = () => {
+      sseConnected = false;
+      try {
+        sseSource.close();
+      } catch (err) {}
+      sseSource = null;
+      if (!sseRetryTimer) {
+        sseRetryTimer = setTimeout(() => {
+          sseRetryTimer = null;
+          if (canvasRegistry.size > 0) {
+            ensureStreamConnected();
+          }
+        }, 900);
+      }
+    };
+  } catch (e) {
+    sseConnected = false;
+  }
+  startFallbackPolling();
+}
+
+function registerCanvas(instanceId, canvasEl) {
+  if (!canvasEl) {
+    canvasRegistry.delete(instanceId);
+    return;
+  }
+  const existing = canvasRegistry.get(instanceId);
+  if (existing && existing.canvas === canvasEl) {
+    drawCanvasEntry(existing);
+    return;
+  }
+  const entry = {
+    canvas: canvasEl,
+    ctx: null,
+    w: 0,
+    h: 0,
+    dpr: 1,
+    grad: null,
+  };
+  canvasRegistry.set(instanceId, entry);
+  drawCanvasEntry(entry);
+  ensureStreamConnected();
+  scheduleRenderLoop();
+}
+
+// ============================================================================
+// Widget State & Multi-Monitor Positioning
+// ============================================================================
 const getActiveScreen = () => {
   try {
     const saved = localStorage.getItem(STORAGE_ACTIVE_SCREEN_KEY);
@@ -223,38 +476,18 @@ export const initialState = {
   resizeStartY: 0,
   startW: 0,
   startH: 0,
-  bars: new Array(DEFAULT_BARS_COUNT).fill(0),
 };
 
 export const updateState = (event, previousState) => {
   if (!previousState) return initialState;
 
   if (event.output && typeof event.output === 'string') {
-    const parts = event.output.trim().split(';').filter(Boolean);
-    if (parts.length > 0) {
-      const parsedBars = parts.map((val) => {
-        const num = parseInt(val, 10);
-        return isNaN(num) ? 0 : Math.max(0, Math.min(100, num));
-      });
-
-      if (previousState.bars && previousState.bars.length === parsedBars.length) {
-        let changed = false;
-        for (let i = 0; i < parsedBars.length; i++) {
-          if (parsedBars[i] !== previousState.bars[i]) {
-            changed = true;
-            break;
-          }
-        }
-        if (!changed) {
-          return previousState;
-        }
-      }
-
-      return {
-        ...previousState,
-        bars: parsedBars,
-      };
+    if (!sseConnected) {
+      ingestBarsLine(event.output);
+      ensureStreamConnected();
     }
+    // Never trigger a React re-render for audio bar polls!
+    return previousState;
   }
 
   if (event.type === 'START_DRAG') {
@@ -636,6 +869,7 @@ export const render = (state, dispatch) => {
   const preview = state?.crossScreenPreview;
 
   if (!isCurrentActive && (!preview || preview.targetScreen !== currentScreenId)) {
+    canvasRegistry.clear();
     return <div style={{ display: 'none' }} />;
   }
 
@@ -662,10 +896,7 @@ export const render = (state, dispatch) => {
     );
   }
 
-  const {
-    enableSnapping = true,
-    bars = [],
-  } = state || {};
+  const { enableSnapping = true } = state || {};
 
   const instances = (state && state.instances && state.instances.length > 0)
     ? state.instances
@@ -676,13 +907,6 @@ export const render = (state, dispatch) => {
         w: state?.w ?? 380,
         h: state?.h ?? 140,
       }];
-
-  const barsData = bars.length > 0 ? bars : new Array(DEFAULT_BARS_COUNT).fill(0);
-  const minHeight = typeof settings.minBarHeightPct === 'number' ? settings.minBarHeightPct : 2;
-  const bandCount = settings.bandCount || 24;
-  const gradientCss = getGradientCss(theme.gradient, settings.gradientMode, bandCount);
-  const gapPx = settings.barGap !== undefined ? settings.barGap : 3;
-  const radiusPx = settings.barCornerRadius || 0;
 
   return (
     <React.Fragment>
@@ -710,11 +934,11 @@ export const render = (state, dispatch) => {
             h,
           });
 
-          let rafId = null;
+          let dragRafId = null;
           let latestMove = null;
 
           const flushMove = () => {
-            rafId = null;
+            dragRafId = null;
             if (!latestMove) return;
             dispatch({
               type: 'MOVE_DRAG',
@@ -730,15 +954,15 @@ export const render = (state, dispatch) => {
               clientY: moveEvent.clientY,
               bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
             };
-            if (!rafId) {
-              rafId = window.requestAnimationFrame(flushMove);
+            if (!dragRafId) {
+              dragRafId = window.requestAnimationFrame(flushMove);
             }
           };
 
           const onMouseUp = (upEvent) => {
-            if (rafId) {
-              window.cancelAnimationFrame(rafId);
-              rafId = null;
+            if (dragRafId) {
+              window.cancelAnimationFrame(dragRafId);
+              dragRafId = null;
             }
             dispatch({
               type: 'END_DRAG',
@@ -769,11 +993,11 @@ export const render = (state, dispatch) => {
             startPosY: y,
           });
 
-          let rafId = null;
+          let resizeRafId = null;
           let latestResize = null;
 
           const flushResize = () => {
-            rafId = null;
+            resizeRafId = null;
             if (!latestResize) return;
             dispatch({
               type: 'MOVE_RESIZE',
@@ -789,15 +1013,15 @@ export const render = (state, dispatch) => {
               clientY: moveEvent.clientY,
               bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
             };
-            if (!rafId) {
-              rafId = window.requestAnimationFrame(flushResize);
+            if (!resizeRafId) {
+              resizeRafId = window.requestAnimationFrame(flushResize);
             }
           };
 
           const onMouseUp = () => {
-            if (rafId) {
-              window.cancelAnimationFrame(rafId);
-              rafId = null;
+            if (resizeRafId) {
+              window.cancelAnimationFrame(resizeRafId);
+              resizeRafId = null;
             }
             dispatch({ type: 'END_RESIZE' });
             window.removeEventListener('mousemove', onMouseMove);
@@ -883,31 +1107,10 @@ export const render = (state, dispatch) => {
               )}
 
               <div style={terminalBodyStyle}>
-                <div style={{ ...barsContainerStyle, gap: `${gapPx}px` }}>
-                  {barsData.map((val, idx) => {
-                    const heightPct = Math.max(minHeight, Math.min(100, val));
-                    const clipTop = (100 - heightPct).toFixed(2);
-                    const clipStyle = radiusPx > 0
-                      ? `inset(${clipTop}% 0 0 0 round ${radiusPx}px ${radiusPx}px 0 0)`
-                      : `inset(${clipTop}% 0 0 0)`;
-
-                    return (
-                      <div key={idx} style={barColumnStyle}>
-                        <div
-                          style={{
-                            ...barFillStyle,
-                            background: gradientCss,
-                            clipPath: clipStyle,
-                            WebkitClipPath: clipStyle,
-                            filter: settings.enableGlow
-                              ? `drop-shadow(0 0 4px ${theme.gradient[0] || '#59cc33'})`
-                              : 'none',
-                          }}
-                        />
-                      </div>
-                    );
-                  })}
-                </div>
+                <canvas
+                  ref={(el) => registerCanvas(instance.id, el)}
+                  style={canvasStyle}
+                />
               </div>
 
               <div
@@ -1000,25 +1203,11 @@ const terminalBodyStyle = {
   boxSizing: 'border-box',
 };
 
-const barsContainerStyle = {
+const canvasStyle = {
   width: '100%',
   height: '100%',
-  display: 'flex',
-  alignItems: 'stretch',
-  justifyContent: 'space-between',
-};
-
-const barColumnStyle = {
-  flex: 1,
-  height: '100%',
-  minWidth: '2px',
-};
-
-const barFillStyle = {
-  width: '100%',
-  height: '100%',
-  transition: 'clip-path 0.04s ease-out, -webkit-clip-path 0.04s ease-out',
-  willChange: 'clip-path',
+  display: 'block',
+  pointerEvents: 'none',
 };
 
 const resizeHandleStyle = {
