@@ -679,6 +679,162 @@ export const initWidgetDesktopSync = (opts = {}) => {
   if (typeof window === 'undefined') return;
 
   const widgetName = opts.widgetName || opts.widgetId || 'widget';
+  const getDispatch = opts.getDispatch;
+
+  // -------------------------------------------------------------------------
+  // Übersicht Menu Bar Screen Selection Recovery Bridge
+  //    When the user selects a monitor (or "Show on main screen") in the
+  //    Übersicht menu bar icon, detect that selection, move the widget onto
+  //    that monitor, and automatically restore Übersicht to "Show on all screens".
+  // -------------------------------------------------------------------------
+  const bridgeGuardKey = `__uebersicht_recovery_bridge_v2_${widgetName}`;
+  if (!window[bridgeGuardKey]) {
+    window[bridgeGuardKey] = true;
+
+    const uebersichtWidgetId = opts.uebersichtWidgetId || `${widgetName}-widget-index-jsx`;
+    let ubWs = null;
+    let selectedScreensFallbackTimer = null;
+
+    const sendUbWsAction = (actionObj) => {
+      const raw = JSON.stringify(actionObj);
+      if (ubWs && ubWs.readyState === 1) {
+        try {
+          ubWs.send(raw);
+          return;
+        } catch (e) {}
+      }
+      try {
+        if (typeof WebSocket !== 'undefined' && window.location && window.location.host) {
+          const tempWs = new WebSocket(`ws://${window.location.host}`, ['ws']);
+          tempWs.onopen = () => {
+            try {
+              tempWs.send(raw);
+            } catch (e) {}
+            setTimeout(() => {
+              try {
+                tempWs.close();
+              } catch (e) {}
+            }, 200);
+          };
+        }
+      } catch (e) {}
+    };
+
+    const resetUebersichtToAllScreens = () => {
+      sendUbWsAction({
+        type: 'WIDGET_SET_TO_ALL_SCREENS',
+        payload: uebersichtWidgetId,
+      });
+    };
+
+    const triggerScreenRecovery = (rawScreenIdentifier) => {
+      const now = Date.now();
+      const lockKey = `uebersicht_recover_lock_${widgetName}`;
+      try {
+        const lastLock = Number(localStorage.getItem(lockKey) || 0);
+        if (now - lastLock < 250) {
+          setTimeout(resetUebersichtToAllScreens, 80);
+          return;
+        }
+        localStorage.setItem(lockKey, String(now));
+      } catch (e) {}
+
+      const targetScreen = resolveActiveScreen(rawScreenIdentifier);
+      const dispatchMove = (attempt = 0) => {
+        const dispatch = getDispatch ? getDispatch() : null;
+        if (dispatch) {
+          dispatch({
+            type: 'MOVE_TO_SCREEN',
+            screenId: targetScreen,
+          });
+        } else if (attempt < 20) {
+          setTimeout(() => dispatchMove(attempt + 1), 50);
+        }
+      };
+      dispatchMove();
+
+      setTimeout(resetUebersichtToAllScreens, 80);
+    };
+
+    const inspectUbStateForRecovery = (onlyIfSingleSelected = true) => {
+      if (typeof fetch === 'undefined' || !window.location || !window.location.host) return;
+      fetch(`http://${window.location.host}/state/`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((state) => {
+          const wSettings = state && state.settings && state.settings[uebersichtWidgetId];
+          if (!wSettings || wSettings.hidden || wSettings.showOnAllScreens) return;
+
+          if (wSettings.showOnMainScreen) {
+            triggerScreenRecovery('main');
+            return;
+          }
+
+          if (wSettings.showOnSelectedScreens) {
+            const screens = Array.isArray(wSettings.screens) ? wSettings.screens : [];
+            if (screens.length === 1) {
+              triggerScreenRecovery(`screen_${screens[0]}`);
+            } else if (!onlyIfSingleSelected && screens.length > 0) {
+              triggerScreenRecovery(`screen_${screens[screens.length - 1]}`);
+            } else {
+              resetUebersichtToAllScreens();
+            }
+          }
+        })
+        .catch(() => {});
+    };
+
+    const connectUbWebSocket = () => {
+      if (typeof WebSocket === 'undefined' || !window.location || !window.location.host) return;
+      try {
+        ubWs = new WebSocket(`ws://${window.location.host}`, ['ws']);
+        ubWs.onmessage = (event) => {
+          if (!event || !event.data) return;
+          let msg = null;
+          try {
+            msg = JSON.parse(event.data);
+          } catch (e) {
+            return;
+          }
+          if (!msg || !msg.type) return;
+
+          if (
+            (msg.type === 'SCREEN_SELECTED_FOR_WIDGET' || msg.type === 'SCREEN_DESELECTED_FOR_WIDGET') &&
+            msg.payload &&
+            msg.payload.id === uebersichtWidgetId &&
+            msg.payload.screenId !== undefined
+          ) {
+            if (selectedScreensFallbackTimer) {
+              clearTimeout(selectedScreensFallbackTimer);
+              selectedScreensFallbackTimer = null;
+            }
+            triggerScreenRecovery(`screen_${msg.payload.screenId}`);
+          } else if (msg.type === 'WIDGET_SET_TO_MAIN_SCREEN' && msg.payload === uebersichtWidgetId) {
+            if (selectedScreensFallbackTimer) {
+              clearTimeout(selectedScreensFallbackTimer);
+              selectedScreensFallbackTimer = null;
+            }
+            triggerScreenRecovery('main');
+          } else if (msg.type === 'WIDGET_SET_TO_SELECTED_SCREENS' && msg.payload === uebersichtWidgetId) {
+            if (selectedScreensFallbackTimer) {
+              clearTimeout(selectedScreensFallbackTimer);
+            }
+            selectedScreensFallbackTimer = setTimeout(() => {
+              selectedScreensFallbackTimer = null;
+              inspectUbStateForRecovery(false);
+            }, 120);
+          }
+        };
+        ubWs.onclose = () => {
+          ubWs = null;
+          setTimeout(connectUbWebSocket, 3000);
+        };
+      } catch (e) {}
+    };
+
+    connectUbWebSocket();
+    setTimeout(() => inspectUbStateForRecovery(true), 250);
+  }
+
   const guardKey = `__uebersicht_desktop_sync_${widgetName}`;
   if (window[guardKey]) return;
   window[guardKey] = true;
@@ -692,7 +848,6 @@ export const initWidgetDesktopSync = (opts = {}) => {
     helperCommand = `"$HOME/Library/Application Support/Übersicht/widgets/${widgetName}.widget/menu_helper" --screens 2>/dev/null || "./${widgetName}.widget/menu_helper" --screens 2>/dev/null`;
   }
 
-  const getDispatch = opts.getDispatch;
   const onSyncPacket = opts.onSyncPacket;
   const onScreensUpdated = opts.onScreensUpdated;
   const storageKeys = opts.storageKeys || [];
@@ -805,153 +960,4 @@ export const initWidgetDesktopSync = (opts = {}) => {
   refreshScreensTopology();
   window.addEventListener('resize', refreshScreensTopology);
   setTimeout(refreshScreensTopology, 1200);
-
-  // -------------------------------------------------------------------------
-  // 6. Übersicht Menu Bar Screen Selection Recovery Bridge
-  //    When the user selects a monitor (or "Show on main screen") in the
-  //    Übersicht menu bar icon, detect that selection, move the widget onto
-  //    that monitor, and automatically restore Übersicht to "Show on all screens".
-  // -------------------------------------------------------------------------
-  const uebersichtWidgetId = opts.uebersichtWidgetId || `${widgetName}-widget-index-jsx`;
-  let ubWs = null;
-  let selectedScreensFallbackTimer = null;
-
-  const sendUbWsAction = (actionObj) => {
-    const raw = JSON.stringify(actionObj);
-    if (ubWs && ubWs.readyState === 1) {
-      try {
-        ubWs.send(raw);
-        return;
-      } catch (e) {}
-    }
-    try {
-      if (typeof WebSocket !== 'undefined' && window.location && window.location.host) {
-        const tempWs = new WebSocket(`ws://${window.location.host}`);
-        tempWs.onopen = () => {
-          try {
-            tempWs.send(raw);
-          } catch (e) {}
-          setTimeout(() => {
-            try {
-              tempWs.close();
-            } catch (e) {}
-          }, 200);
-        };
-      }
-    } catch (e) {}
-  };
-
-  const resetUebersichtToAllScreens = () => {
-    sendUbWsAction({
-      type: 'WIDGET_SET_TO_ALL_SCREENS',
-      payload: uebersichtWidgetId,
-    });
-  };
-
-  const triggerScreenRecovery = (rawScreenIdentifier) => {
-    const now = Date.now();
-    const lockKey = `uebersicht_recover_lock_${widgetName}`;
-    try {
-      const lastLock = Number(localStorage.getItem(lockKey) || 0);
-      if (now - lastLock < 250) {
-        setTimeout(resetUebersichtToAllScreens, 80);
-        return;
-      }
-      localStorage.setItem(lockKey, String(now));
-    } catch (e) {}
-
-    const targetScreen = resolveActiveScreen(rawScreenIdentifier);
-    const dispatchMove = (attempt = 0) => {
-      const dispatch = getDispatch ? getDispatch() : null;
-      if (dispatch) {
-        dispatch({
-          type: 'MOVE_TO_SCREEN',
-          screenId: targetScreen,
-        });
-      } else if (attempt < 20) {
-        setTimeout(() => dispatchMove(attempt + 1), 50);
-      }
-    };
-    dispatchMove();
-
-    setTimeout(resetUebersichtToAllScreens, 80);
-  };
-
-  const inspectUbStateForRecovery = (onlyIfSingleSelected = true) => {
-    if (typeof fetch === 'undefined' || !window.location || !window.location.host) return;
-    fetch(`http://${window.location.host}/state/`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((state) => {
-        const wSettings = state && state.settings && state.settings[uebersichtWidgetId];
-        if (!wSettings || wSettings.hidden || wSettings.showOnAllScreens) return;
-
-        if (wSettings.showOnMainScreen) {
-          triggerScreenRecovery('main');
-          return;
-        }
-
-        if (wSettings.showOnSelectedScreens) {
-          const screens = Array.isArray(wSettings.screens) ? wSettings.screens : [];
-          if (screens.length === 1) {
-            triggerScreenRecovery(`screen_${screens[0]}`);
-          } else if (!onlyIfSingleSelected && screens.length > 0) {
-            triggerScreenRecovery(`screen_${screens[screens.length - 1]}`);
-          } else {
-            resetUebersichtToAllScreens();
-          }
-        }
-      })
-      .catch(() => {});
-  };
-
-  const connectUbWebSocket = () => {
-    if (typeof WebSocket === 'undefined' || !window.location || !window.location.host) return;
-    try {
-      ubWs = new WebSocket(`ws://${window.location.host}`);
-      ubWs.onmessage = (event) => {
-        if (!event || !event.data) return;
-        let msg = null;
-        try {
-          msg = JSON.parse(event.data);
-        } catch (e) {
-          return;
-        }
-        if (!msg || !msg.type) return;
-
-        if (
-          (msg.type === 'SCREEN_SELECTED_FOR_WIDGET' || msg.type === 'SCREEN_DESELECTED_FOR_WIDGET') &&
-          msg.payload &&
-          msg.payload.id === uebersichtWidgetId &&
-          msg.payload.screenId !== undefined
-        ) {
-          if (selectedScreensFallbackTimer) {
-            clearTimeout(selectedScreensFallbackTimer);
-            selectedScreensFallbackTimer = null;
-          }
-          triggerScreenRecovery(`screen_${msg.payload.screenId}`);
-        } else if (msg.type === 'WIDGET_SET_TO_MAIN_SCREEN' && msg.payload === uebersichtWidgetId) {
-          if (selectedScreensFallbackTimer) {
-            clearTimeout(selectedScreensFallbackTimer);
-            selectedScreensFallbackTimer = null;
-          }
-          triggerScreenRecovery('main');
-        } else if (msg.type === 'WIDGET_SET_TO_SELECTED_SCREENS' && msg.payload === uebersichtWidgetId) {
-          if (selectedScreensFallbackTimer) {
-            clearTimeout(selectedScreensFallbackTimer);
-          }
-          selectedScreensFallbackTimer = setTimeout(() => {
-            selectedScreensFallbackTimer = null;
-            inspectUbStateForRecovery(false);
-          }, 120);
-        }
-      };
-      ubWs.onclose = () => {
-        ubWs = null;
-        setTimeout(connectUbWebSocket, 3000);
-      };
-    } catch (e) {}
-  };
-
-  connectUbWebSocket();
-  setTimeout(() => inspectUbStateForRecovery(true), 250);
 };
