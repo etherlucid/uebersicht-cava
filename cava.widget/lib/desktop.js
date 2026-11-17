@@ -679,7 +679,13 @@ export const initWidgetDesktopSync = (opts = {}) => {
   if (typeof window === 'undefined') return;
 
   const widgetName = opts.widgetName || opts.widgetId || 'widget';
-  const getDispatch = opts.getDispatch;
+  const optsKey = `__uebersicht_desktop_opts_${widgetName}`;
+  window[optsKey] = opts;
+
+  const getDispatch = () => {
+    const latest = window[optsKey];
+    return latest && latest.getDispatch ? latest.getDispatch() : null;
+  };
 
   // -------------------------------------------------------------------------
   // Übersicht Menu Bar Screen Selection Recovery Bridge
@@ -687,11 +693,19 @@ export const initWidgetDesktopSync = (opts = {}) => {
   //    Übersicht menu bar icon, detect that selection, move the widget onto
   //    that monitor, and automatically restore Übersicht to "Show on all screens".
   // -------------------------------------------------------------------------
-  const bridgeGuardKey = `__uebersicht_recovery_bridge_v2_${widgetName}`;
+  const bridgeGuardKey = `__uebersicht_recovery_bridge_v4_${widgetName}`;
   if (!window[bridgeGuardKey]) {
     window[bridgeGuardKey] = true;
 
     const uebersichtWidgetId = opts.uebersichtWidgetId || `${widgetName}-widget-index-jsx`;
+    const wsRefKey = `__uebersicht_ub_ws_${widgetName}`;
+    if (window[wsRefKey]) {
+      try {
+        window[wsRefKey].onclose = null;
+        window[wsRefKey].close();
+      } catch (e) {}
+      window[wsRefKey] = null;
+    }
     let ubWs = null;
     let selectedScreensFallbackTimer = null;
 
@@ -728,32 +742,34 @@ export const initWidgetDesktopSync = (opts = {}) => {
     };
 
     const triggerScreenRecovery = (rawScreenIdentifier) => {
-      const now = Date.now();
-      const lockKey = `uebersicht_recover_lock_${widgetName}`;
+      const targetScreen = resolveActiveScreen(rawScreenIdentifier);
       try {
-        const lastLock = Number(localStorage.getItem(lockKey) || 0);
-        if (now - lastLock < 250) {
-          setTimeout(resetUebersichtToAllScreens, 80);
-          return;
-        }
-        localStorage.setItem(lockKey, String(now));
+        localStorage.setItem(`${widgetName}_active_screen`, targetScreen);
       } catch (e) {}
 
-      const targetScreen = resolveActiveScreen(rawScreenIdentifier);
-      const dispatchMove = (attempt = 0) => {
-        const dispatch = getDispatch ? getDispatch() : null;
+      const fireMove = () => {
+        const dispatch = getDispatch();
         if (dispatch) {
-          dispatch({
-            type: 'MOVE_TO_SCREEN',
-            screenId: targetScreen,
-          });
-        } else if (attempt < 20) {
-          setTimeout(() => dispatchMove(attempt + 1), 50);
+          try {
+            dispatch({
+              type: 'MOVE_TO_SCREEN',
+              screenId: targetScreen,
+            });
+          } catch (e) {}
         }
       };
-      dispatchMove();
 
-      setTimeout(resetUebersichtToAllScreens, 80);
+      // 1. Fire immediately on surviving WebView
+      fireMove();
+
+      // 2. Restore Übersicht to "Show on all screens" so all WebViews remount
+      setTimeout(resetUebersichtToAllScreens, 40);
+
+      // 3. Fire again after remount so newly recreated VirtualDomWidget instances
+      //    update their fresh RenderLoop state to targetScreen
+      setTimeout(fireMove, 140);
+      setTimeout(fireMove, 300);
+      setTimeout(fireMove, 500);
     };
 
     const inspectUbStateForRecovery = (onlyIfSingleSelected = true) => {
@@ -787,6 +803,7 @@ export const initWidgetDesktopSync = (opts = {}) => {
       if (typeof WebSocket === 'undefined' || !window.location || !window.location.host) return;
       try {
         ubWs = new WebSocket(`ws://${window.location.host}`, ['ws']);
+        window[wsRefKey] = ubWs;
         ubWs.onmessage = (event) => {
           if (!event || !event.data) return;
           let msg = null;
@@ -835,7 +852,7 @@ export const initWidgetDesktopSync = (opts = {}) => {
     setTimeout(() => inspectUbStateForRecovery(true), 250);
   }
 
-  const guardKey = `__uebersicht_desktop_sync_${widgetName}`;
+  const guardKey = `__uebersicht_desktop_sync_v4_${widgetName}`;
   if (window[guardKey]) return;
   window[guardKey] = true;
 
@@ -848,11 +865,6 @@ export const initWidgetDesktopSync = (opts = {}) => {
     helperCommand = `"$HOME/Library/Application Support/Übersicht/widgets/${widgetName}.widget/menu_helper" --screens 2>/dev/null || "./${widgetName}.widget/menu_helper" --screens 2>/dev/null`;
   }
 
-  const onSyncPacket = opts.onSyncPacket;
-  const onScreensUpdated = opts.onScreensUpdated;
-  const storageKeys = opts.storageKeys || [];
-  const onStorageEvent = opts.onStorageEvent;
-
   let lastProcessedTs = 0;
 
   const handlePacket = (data) => {
@@ -860,7 +872,7 @@ export const initWidgetDesktopSync = (opts = {}) => {
     if (data._ts && data._ts === lastProcessedTs) return;
     if (data._ts) lastProcessedTs = data._ts;
 
-    const dispatch = getDispatch ? getDispatch() : null;
+    const dispatch = getDispatch();
     if (!dispatch) return;
 
     if (data.widget === '*' && data.type === 'ORDER_CHANGED') {
@@ -868,8 +880,9 @@ export const initWidgetDesktopSync = (opts = {}) => {
       return;
     }
 
-    if (data.widget === widgetName && onSyncPacket) {
-      onSyncPacket(data, dispatch);
+    const latestOpts = window[optsKey] || opts;
+    if (data.widget === widgetName && latestOpts.onSyncPacket) {
+      latestOpts.onSyncPacket(data, dispatch);
     }
   };
 
@@ -881,6 +894,8 @@ export const initWidgetDesktopSync = (opts = {}) => {
 
   window.addEventListener('storage', (event) => {
     if (!event.key || !event.newValue) return;
+    const latestOpts = window[optsKey] || opts;
+    const storageKeys = latestOpts.storageKeys || [];
     if (
       event.key === `uebersicht_sync_packet_${widgetName}` ||
       event.key === `uebersicht_drag_preview_${widgetName}` ||
@@ -895,22 +910,22 @@ export const initWidgetDesktopSync = (opts = {}) => {
         const parsed = JSON.parse(event.newValue);
         if (Array.isArray(parsed) && parsed.length > 0) {
           cachedTopology = parsed;
-          const dispatch = getDispatch ? getDispatch() : null;
+          const dispatch = getDispatch();
           if (dispatch) {
             dispatch({ type: 'TOPOLOGY_UPDATED', topology: parsed });
           }
         }
       } catch (e) {}
-    } else if (storageKeys.includes(event.key) && onStorageEvent) {
-      const dispatch = getDispatch ? getDispatch() : null;
+    } else if (storageKeys.includes(event.key) && latestOpts.onStorageEvent) {
+      const dispatch = getDispatch();
       if (dispatch) {
-        onStorageEvent(event, dispatch);
+        latestOpts.onStorageEvent(event, dispatch);
       }
     }
   });
 
   window.addEventListener('uebersicht:order-changed', () => {
-    const dispatch = getDispatch ? getDispatch() : null;
+    const dispatch = getDispatch();
     if (dispatch) {
       dispatch({ type: 'ORDER_CHANGED' });
     }
@@ -921,9 +936,10 @@ export const initWidgetDesktopSync = (opts = {}) => {
     try {
       const rawScreens = JSON.parse(out.trim());
       const normalized = updateScreensTopology(rawScreens);
-      const dispatch = getDispatch ? getDispatch() : null;
-      if (onScreensUpdated && dispatch) {
-        onScreensUpdated(normalized, dispatch);
+      const dispatch = getDispatch();
+      const latestOpts = window[optsKey] || opts;
+      if (latestOpts.onScreensUpdated && dispatch) {
+        latestOpts.onScreensUpdated(normalized, dispatch);
       } else if (dispatch) {
         dispatch({ type: 'TOPOLOGY_UPDATED', topology: normalized });
       }
