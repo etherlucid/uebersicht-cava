@@ -120,6 +120,7 @@ def _handle_http_client(conn):
         )
         conn.settimeout(0.05)
         conn.sendall(headers.encode("ascii"))
+        conn.setblocking(False)
         with _clients_lock:
             _sse_clients.append(conn)
     except Exception:
@@ -169,6 +170,9 @@ def _broadcast_bars(line):
                         c.close()
                         continue
                 c.sendall(payload)
+                alive.append(c)
+            except BlockingIOError:
+                # Client buffer full; skip this frame without stalling other clients
                 alive.append(c)
             except Exception:
                 try:

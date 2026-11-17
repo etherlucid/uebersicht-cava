@@ -113,16 +113,44 @@ function interpolateBands(stops, totalBands) {
 // ============================================================================
 // High-Frame-Rate (60fps) Direct Canvas Visualizer Engine
 // ============================================================================
+if (typeof window !== "undefined" && typeof window.__cava_cleanup === "function") {
+  try { window.__cava_cleanup(); } catch (e) {}
+}
+
 let numBars = DEFAULT_BARS_COUNT;
 let targetBars = new Float32Array(numBars);
 let currentBars = new Float32Array(numBars);
 const canvasRegistry = new Map(); // instanceId -> { canvas, ctx, w, h, dpr, grad }
+const canvasRefCallbacks = new Map();
 let rafId = null;
 let lastFrameTs = 0;
 let sseSource = null;
 let sseConnected = false;
 let sseRetryTimer = null;
 let fallbackPollTimer = null;
+
+if (typeof window !== "undefined") {
+  window.__cava_cleanup = () => {
+    if (rafId) {
+      window.cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    if (sseRetryTimer) {
+      clearTimeout(sseRetryTimer);
+      sseRetryTimer = null;
+    }
+    if (fallbackPollTimer) {
+      clearInterval(fallbackPollTimer);
+      fallbackPollTimer = null;
+    }
+    if (sseSource) {
+      try { sseSource.close(); } catch (e) {}
+      sseSource = null;
+    }
+    sseConnected = false;
+    canvasRegistry.clear();
+  };
+}
 
 function buildCanvasGradient(ctx, cssHeight) {
   const colors = theme.gradient && theme.gradient.length > 0 ? theme.gradient : ['#59cc33'];
@@ -349,6 +377,15 @@ function ensureStreamConnected() {
     sseConnected = false;
   }
   startFallbackPolling();
+}
+
+function getCanvasRef(instanceId) {
+  let cb = canvasRefCallbacks.get(instanceId);
+  if (!cb) {
+    cb = (el) => registerCanvas(instanceId, el);
+    canvasRefCallbacks.set(instanceId, cb);
+  }
+  return cb;
 }
 
 function registerCanvas(instanceId, canvasEl) {
@@ -1104,7 +1141,7 @@ export const render = (state, dispatch) => {
 
               <div style={terminalBodyStyle}>
                 <canvas
-                  ref={(el) => registerCanvas(instance.id, el)}
+                  ref={getCanvasRef(instance.id)}
                   style={canvasStyle}
                 />
               </div>
@@ -1204,6 +1241,9 @@ const canvasStyle = {
   height: '100%',
   display: 'block',
   pointerEvents: 'none',
+  transform: 'translateZ(0)',
+  WebkitTransform: 'translateZ(0)',
+  willChange: 'contents',
 };
 
 const resizeHandleStyle = {
